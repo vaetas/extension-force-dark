@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Force Dark</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="panel">
+      <header class="header">
+        <h1>Force Dark</h1>
+        <p id="host" class="host">—</p>
+      </header>
+
+      <label class="row">
+        <span>This site</span>
+        <input id="site-toggle" type="checkbox" />
+      </label>
+
+      <label class="row">
+        <span>All websites</span>
+        <input id="global-toggle" type="checkbox" />
+      </label>
+
+      <p id="status" class="status">Checking…</p>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
