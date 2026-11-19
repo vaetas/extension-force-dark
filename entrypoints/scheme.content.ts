@@ -1,8 +1,8 @@
 import { shouldSkipFrame } from '../src/guards/page-guard';
 import {
+  forceDarkColorSchemeMedia,
   isPrintMedia,
   mediaMentionsColorScheme,
-  swapColorSchemeMedia,
 } from '../src/theme/scheme-media';
 
 /**
@@ -18,12 +18,16 @@ export default defineContentScript({
   main() {
     if (shouldSkipFrame(location)) return;
 
+    const flagHost = window as Window & { __forceDarkScheme?: boolean };
+    if (flagHost.__forceDarkScheme) return;
+    flagHost.__forceDarkScheme = true;
+
     const realMatchMedia = window.matchMedia.bind(window);
-    const osPrefersDark = realMatchMedia('(prefers-color-scheme: dark)').matches;
 
     const patchMediaQueryList = (
       mql: MediaQueryList,
       forcedMatches: boolean,
+      mediaLabel: string,
     ): MediaQueryList => {
       const listeners = new Map<
         EventListenerOrEventListenerObject,
@@ -35,7 +39,7 @@ export default defineContentScript({
           return forcedMatches;
         },
         get media() {
-          return mql.media;
+          return mediaLabel;
         },
         get onchange() {
           return mql.onchange;
@@ -111,15 +115,11 @@ export default defineContentScript({
     };
 
     window.matchMedia = ((query: string): MediaQueryList => {
-      const mql = realMatchMedia(query);
-      if (!/prefers-color-scheme/i.test(query)) {
-        return mql;
+      if (!mediaMentionsColorScheme(query) || isPrintMedia(query)) {
+        return realMatchMedia(query);
       }
-      const wantsDark = /prefers-color-scheme\s*:\s*dark/i.test(query);
-      const wantsLight = /prefers-color-scheme\s*:\s*light/i.test(query);
-      if (wantsDark) return patchMediaQueryList(mql, true);
-      if (wantsLight) return patchMediaQueryList(mql, false);
-      return mql;
+      const forced = realMatchMedia(forceDarkColorSchemeMedia(query));
+      return patchMediaQueryList(forced, forced.matches, query);
     }) as typeof window.matchMedia;
 
     // Force color-scheme early for light-dark() and form controls.
@@ -132,42 +132,51 @@ export default defineContentScript({
     };
     applyRootScheme();
 
-    const rewriteSheetMedia = (sheet: CSSStyleSheet) => {
-      // Only swap media text when the OS is light. If OS is already dark,
-      // swapping would turn the site's dark CSS off.
-      if (osPrefersDark) return;
-
-      let rules: CSSRuleList;
-      try {
-        rules = sheet.cssRules;
-      } catch {
-        return;
-      }
-
+    const rewriteRuleList = (rules: CSSRuleList) => {
       for (const rule of Array.from(rules)) {
-        if (!(rule instanceof CSSMediaRule)) continue;
-        const mediaText = rule.media.mediaText;
-        if (isPrintMedia(mediaText)) continue;
-        if (!mediaMentionsColorScheme(mediaText)) continue;
-        const swapped = swapColorSchemeMedia(mediaText);
-        if (swapped !== mediaText) {
-          try {
-            rule.media.mediaText = swapped;
-          } catch {
-            // Some browsers make mediaText read-only; try delete/append.
+        if (rule instanceof CSSMediaRule) {
+          const mediaText = rule.media.mediaText;
+          const forced = forceDarkColorSchemeMedia(mediaText);
+          if (forced !== mediaText) {
             try {
-              const length = rule.media.length;
-              for (let i = length - 1; i >= 0; i -= 1) {
-                rule.media.deleteMedium(rule.media.item(i)!);
-              }
-              for (const part of swapped.split(',')) {
-                rule.media.appendMedium(part.trim());
-              }
+              rule.media.mediaText = forced;
             } catch {
-              // ignore
+              try {
+                const length = rule.media.length;
+                for (let i = length - 1; i >= 0; i -= 1) {
+                  rule.media.deleteMedium(rule.media.item(i)!);
+                }
+                for (const part of forced.split(',')) {
+                  const medium = part.trim();
+                  if (medium) rule.media.appendMedium(medium);
+                }
+              } catch {
+                // ignore
+              }
             }
           }
         }
+
+        if ('cssRules' in rule && rule.cssRules) {
+          try {
+            rewriteRuleList(rule.cssRules as CSSRuleList);
+          } catch {
+            // ignore nested rules we cannot read
+          }
+        }
+      }
+    };
+
+    let rewriteDepth = 0;
+    const rewriteSheetMedia = (sheet: CSSStyleSheet) => {
+      if (rewriteDepth > 0) return;
+      rewriteDepth += 1;
+      try {
+        rewriteRuleList(sheet.cssRules);
+      } catch {
+        // Cross-origin sheets are unreadable.
+      } finally {
+        rewriteDepth -= 1;
       }
     };
 
@@ -175,22 +184,21 @@ export default defineContentScript({
       for (const sheet of Array.from(document.styleSheets)) {
         rewriteSheetMedia(sheet);
       }
+      const adopted = document.adoptedStyleSheets;
+      if (adopted) {
+        for (const sheet of adopted) rewriteSheetMedia(sheet);
+      }
     };
 
     const rewriteMediaAttributes = () => {
-      if (osPrefersDark) return;
       const nodes = document.querySelectorAll<HTMLElement>(
         'link[media], source[media], style[media], iframe[media]',
       );
       for (const node of nodes) {
         const media = node.getAttribute('media');
-        if (!media || isPrintMedia(media) || !mediaMentionsColorScheme(media)) {
-          continue;
-        }
-        const swapped = swapColorSchemeMedia(media);
-        if (swapped !== media) {
-          node.setAttribute('media', swapped);
-        }
+        if (!media) continue;
+        const forced = forceDarkColorSchemeMedia(media);
+        if (forced !== media) node.setAttribute('media', forced);
       }
     };
 
@@ -202,11 +210,59 @@ export default defineContentScript({
     if (document.documentElement) {
       boot();
     }
+    document.addEventListener('DOMContentLoaded', boot, { once: true });
+    window.addEventListener('load', boot, { once: true });
+    document.addEventListener(
+      'load',
+      (event) => {
+        if (event.target instanceof HTMLLinkElement) boot();
+      },
+      true,
+    );
 
-    const observer = new MutationObserver(() => {
-      rewriteAllSheets();
-      rewriteMediaAttributes();
-      applyRootScheme();
+    let rewriteScheduled = false;
+    const scheduleRewrite = () => {
+      if (rewriteScheduled) return;
+      rewriteScheduled = true;
+      requestAnimationFrame(() => {
+        rewriteScheduled = false;
+        boot();
+      });
+    };
+
+    try {
+      const originalInsertRule = CSSStyleSheet.prototype.insertRule;
+      CSSStyleSheet.prototype.insertRule = function (
+        rule: string,
+        index?: number,
+      ) {
+        const result = originalInsertRule.call(this, rule, index);
+        rewriteSheetMedia(this);
+        return result;
+      };
+    } catch {
+      // Some pages lock the stylesheet prototype.
+    }
+
+    const observer = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        if (mutation.type === 'attributes') {
+          scheduleRewrite();
+          applyRootScheme();
+          return;
+        }
+        for (const node of Array.from(mutation.addedNodes)) {
+          if (!(node instanceof Element)) continue;
+          if (
+            node.matches('style, link, source, iframe') ||
+            node.querySelector('style, link, source, iframe')
+          ) {
+            scheduleRewrite();
+            applyRootScheme();
+            return;
+          }
+        }
+      }
     });
 
     const startObserver = () => {

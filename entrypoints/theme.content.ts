@@ -15,7 +15,7 @@ export default defineContentScript({
     // The background probes this after a settings reload to see whether this
     // navigation actually received the content script.
     (globalThis as Record<string, unknown>)['__forceDarkInjected'] = true;
-    document.documentElement?.setAttribute('data-force-dark', '1');
+    document.documentElement?.setAttribute('data-force-dark-injected', '1');
 
     if (shouldSkipFrame(location)) {
       void reportStatus('blocked');

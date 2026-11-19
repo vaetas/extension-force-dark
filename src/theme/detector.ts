@@ -29,18 +29,13 @@ export function hasDarkMarkers(doc: Document): boolean {
 }
 
 export function hasStrictDarkColorScheme(doc: Document): boolean {
+  // Only an author meta tag counts. The extension sets `color-scheme: dark`
+  // on the root itself; treating that computed value as "already dark"
+  // skipped recolor and left light pages unchanged.
   const meta = doc.querySelector(COLOR_SCHEME_META) as HTMLMetaElement | null;
-  if (meta) {
-    const content = meta.content.toLowerCase().trim();
-    if (content === 'dark' || content === 'only dark') return true;
-    if (content === 'light' || content === 'only light') return false;
-  }
-
-  const scheme = getComputedStyle(doc.documentElement)
-    .getPropertyValue('color-scheme')
-    .trim()
-    .toLowerCase();
-  return scheme === 'dark' || scheme === 'only dark';
+  if (!meta) return false;
+  const content = meta.content.toLowerCase().trim();
+  return content === 'only dark';
 }
 
 function samplePoint(

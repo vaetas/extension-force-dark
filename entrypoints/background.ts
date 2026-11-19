@@ -191,7 +191,8 @@ async function readInjected(tabId: number): Promise<boolean | null> {
     const [injection] = await browser.scripting.executeScript({
       target: { tabId },
       func: () =>
-        document.documentElement?.getAttribute('data-force-dark') === '1' ||
+        document.documentElement?.getAttribute('data-force-dark-injected') ===
+          '1' ||
         (globalThis as Record<string, unknown>)['__forceDarkInjected'] === true,
     });
     return injection?.result === true;
