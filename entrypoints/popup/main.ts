@@ -1,4 +1,4 @@
-import { isRestrictedUrl, originFromUrl } from '../../src/guards/page-guard';
+import { isRestrictedUrl, isTransientUrl, originFromUrl } from '../../src/guards/page-guard';
 import {
   getTabThemeState,
   isOriginEnabled,
@@ -7,8 +7,8 @@ import {
   setEnabledForAll,
   setOriginEnabled,
   type ForceDarkSettings,
-  type PageThemeStatus,
 } from '../../src/storage/settings';
+import { statusLabel } from '../../src/theme/status-label';
 
 const hostEl = document.getElementById('host') as HTMLParagraphElement;
 const statusEl = document.getElementById('status') as HTMLParagraphElement;
@@ -17,52 +17,60 @@ const globalToggle = document.getElementById(
   'global-toggle',
 ) as HTMLInputElement;
 
-function statusLabel(status: PageThemeStatus | null, enabled: boolean): string {
-  if (!enabled) return 'Off for this site';
-  switch (status) {
-    case 'native':
-      return 'Using this site’s dark theme';
-    case 'recolor':
-      return 'Recoloring this page';
-    case 'filter':
-      return 'Approximated with a filter';
-    case 'blocked':
-      return 'This page can’t be changed';
-    case 'off':
-      return 'Off for this site';
-    default:
-      return 'Force dark is enabled';
-  }
+let renderGeneration = 0;
+let writeChain: Promise<void> = Promise.resolve();
+let shownOrigin: string | null = null;
+
+function enqueueSettingsWrite(task: () => Promise<void>): void {
+  writeChain = writeChain.then(task).catch((error) => {
+    console.warn('[ForceDark] settings write failed', error);
+  });
 }
 
-async function getActiveTab(): Promise<chrome.tabs.Tab | null> {
+async function getActiveTab() {
   const tabs = await browser.tabs.query({ active: true, currentWindow: true });
   return tabs[0] ?? null;
 }
 
 async function applySettings(next: ForceDarkSettings): Promise<void> {
-  // Background listens for storage changes, re-registers scripts, and reloads
-  // the active tab so document_start hooks run cleanly.
+  // Background re-registers scripts, then reloads the active tab.
   await saveSettings(next);
 }
 
 async function render(): Promise<void> {
+  const generation = ++renderGeneration;
   const settings = await loadSettings();
   const tab = await getActiveTab();
-  const restricted = !tab?.url || isRestrictedUrl(tab.url);
-  const origin = tab?.url ? originFromUrl(tab.url) : null;
+  if (generation !== renderGeneration) return;
 
   globalToggle.checked = settings.enabledForAll;
 
-  if (restricted || !origin || tab?.id == null) {
-    hostEl.textContent = restricted
-      ? 'This page can’t be changed'
-      : 'No active site';
+  const url = tab?.url;
+  if (tab?.id == null || !url || isTransientUrl(url)) {
+    siteToggle.disabled = true;
+    statusEl.textContent = 'Updating…';
+    return;
+  }
+
+  if (isRestrictedUrl(url)) {
+    shownOrigin = null;
+    hostEl.textContent = 'This page can’t be changed';
     siteToggle.checked = false;
     siteToggle.disabled = true;
     statusEl.textContent = 'This page can’t be changed';
     return;
   }
+
+  const origin = originFromUrl(url);
+  if (!origin) {
+    shownOrigin = null;
+    hostEl.textContent = 'No active site';
+    siteToggle.checked = false;
+    siteToggle.disabled = true;
+    statusEl.textContent = 'This page can’t be changed';
+    return;
+  }
+  shownOrigin = origin;
 
   let host = origin;
   try {
@@ -77,34 +85,64 @@ async function render(): Promise<void> {
   siteToggle.checked = enabled;
 
   const state = await getTabThemeState(tab.id);
+  if (generation !== renderGeneration) return;
   statusEl.textContent = statusLabel(state?.status ?? null, enabled);
 }
 
 siteToggle.addEventListener('change', () => {
-  void (async () => {
+  const enabled = siteToggle.checked;
+  const originHint = shownOrigin;
+  renderGeneration += 1;
+  enqueueSettingsWrite(async () => {
     const settings = await loadSettings();
-    const tab = await getActiveTab();
-    if (!tab?.url || tab.id == null) return;
-    const origin = originFromUrl(tab.url);
+    let origin = originHint;
+    if (!origin) {
+      const tab = await getActiveTab();
+      if (
+        !tab?.url ||
+        tab.id == null ||
+        isTransientUrl(tab.url) ||
+        isRestrictedUrl(tab.url)
+      ) {
+        return;
+      }
+      origin = originFromUrl(tab.url);
+    }
     if (!origin) return;
-
-    const next = setOriginEnabled(settings, origin, siteToggle.checked);
-    await applySettings(next);
-    // Brief delay so the reloaded tab can report status.
-    setTimeout(() => {
-      void render();
-    }, 400);
-  })();
+    await applySettings(setOriginEnabled(settings, origin, enabled));
+    await render();
+  });
 });
 
 globalToggle.addEventListener('change', () => {
-  void (async () => {
+  const enabledForAll = globalToggle.checked;
+  renderGeneration += 1;
+  enqueueSettingsWrite(async () => {
     const settings = await loadSettings();
-    const next = setEnabledForAll(settings, globalToggle.checked);
-    await applySettings(next);
-    setTimeout(() => {
-      void render();
-    }, 400);
+    await applySettings(setEnabledForAll(settings, enabledForAll));
+    await render();
+  });
+});
+
+browser.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes.forceDarkSettings) {
+    void render();
+    return;
+  }
+  if (
+    area === 'session' &&
+    Object.keys(changes).some((key) => key.startsWith('tabTheme:'))
+  ) {
+    void render();
+  }
+});
+
+browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.status !== 'complete' && !changeInfo.url) return;
+  void (async () => {
+    const active = await getActiveTab();
+    if (active?.id !== tabId) return;
+    await render();
   })();
 });
 

@@ -12,6 +12,11 @@ export default defineContentScript({
   allFrames: true,
   registration: 'runtime',
   main(ctx) {
+    // The background probes this after a settings reload to see whether this
+    // navigation actually received the content script.
+    (globalThis as Record<string, unknown>)['__forceDarkInjected'] = true;
+    document.documentElement?.setAttribute('data-force-dark', '1');
+
     if (shouldSkipFrame(location)) {
       void reportStatus('blocked');
       return;
@@ -61,6 +66,7 @@ async function reportStatus(status: PageThemeStatus): Promise<void> {
       type: 'REPORT_THEME_STATUS',
       status,
       origin: location.origin,
+      timeOrigin: performance.timeOrigin,
     });
   } catch {
     // Extension context may be gone.

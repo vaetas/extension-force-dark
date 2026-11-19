@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   isBlockedFrameHost,
   isRestrictedUrl,
+  isTransientUrl,
   originFromUrl,
   shouldSkipFrame,
 } from './page-guard';
@@ -44,6 +45,13 @@ describe('page guard', () => {
         protocol: 'about:',
       }),
     ).toBe(true);
+  });
+
+  it('treats blank documents as transient reloads', () => {
+    expect(isTransientUrl(undefined)).toBe(true);
+    expect(isTransientUrl('about:blank')).toBe(true);
+    expect(isTransientUrl('about:srcdoc')).toBe(true);
+    expect(isTransientUrl('https://example.com')).toBe(false);
   });
 
   it('parses origins', () => {

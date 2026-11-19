@@ -7,6 +7,8 @@ export type Message =
       type: 'REPORT_THEME_STATUS';
       status: PageThemeStatus;
       origin: string;
+      /** performance.timeOrigin for this document, so stale reports lose. */
+      timeOrigin: number;
     }
   | { type: 'RELOAD_TAB' };
 

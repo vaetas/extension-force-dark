@@ -72,6 +72,16 @@ export function shouldSkipFrame(locationLike: {
   return isBlockedFrameHost(locationLike.hostname, locationLike.href);
 }
 
+/** about:blank and empty URLs show up mid-reload and are not the real tab. */
+export function isTransientUrl(url: string | undefined | null): boolean {
+  if (!url) return true;
+  return (
+    url === 'about:srcdoc' ||
+    url === 'about:blank' ||
+    url.startsWith('about:blank')
+  );
+}
+
 export function originFromUrl(url: string): string | null {
   try {
     return new URL(url).origin;

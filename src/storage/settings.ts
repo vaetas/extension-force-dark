@@ -74,14 +74,20 @@ export function setEnabledForAll(
   };
 }
 
+export function normalizeSettings(
+  stored: Partial<ForceDarkSettings> | undefined,
+): ForceDarkSettings {
+  return {
+    enabledForAll: stored?.enabledForAll ?? DEFAULT_SETTINGS.enabledForAll,
+    disabledOrigins: [...(stored?.disabledOrigins ?? [])],
+    enabledOrigins: [...(stored?.enabledOrigins ?? [])],
+  };
+}
+
 export async function loadSettings(): Promise<ForceDarkSettings> {
   const result = await browser.storage.local.get(SETTINGS_KEY);
   const stored = result[SETTINGS_KEY] as Partial<ForceDarkSettings> | undefined;
-  return {
-    enabledForAll: stored?.enabledForAll ?? DEFAULT_SETTINGS.enabledForAll,
-    disabledOrigins: stored?.disabledOrigins ?? [],
-    enabledOrigins: stored?.enabledOrigins ?? [],
-  };
+  return normalizeSettings(stored);
 }
 
 export async function saveSettings(
