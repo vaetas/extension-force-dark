@@ -1,28 +1,21 @@
-import {
-  hasFrameworkRoot,
-  samplePageIsDark,
-} from '../detector';
+import { hasFrameworkRoot, samplePageIsDark } from '../detector';
 import {
   EXTENSION_STYLE_ID,
-  FILTER_STYLE_ID,
+  FLASH_STYLE_ID,
+  INVERT_STYLE_ID,
   ROOT_SCHEME_ATTR,
+  SCHEME_ATTR,
+  SCHEME_READY_ATTR,
 } from '../css-utils';
 import type { PageContext, PageThemeStrategy, StrategyResult } from '../types';
 
-function waitFor(event: 'DOMContentLoaded' | 'load'): Promise<void> {
+function whenParsed(doc: Document): Promise<void> {
   return new Promise((resolve) => {
-    if (
-      event === 'DOMContentLoaded' &&
-      document.readyState !== 'loading'
-    ) {
+    if (doc.readyState !== 'loading') {
       resolve();
       return;
     }
-    if (event === 'load' && document.readyState === 'complete') {
-      resolve();
-      return;
-    }
-    window.addEventListener(event, () => resolve(), { once: true });
+    doc.addEventListener('DOMContentLoaded', () => resolve(), { once: true });
   });
 }
 
@@ -30,65 +23,65 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function withSheetsDisabled<T>(fn: () => T): T {
-  const sheets = [
-    document.getElementById(EXTENSION_STYLE_ID),
-    document.getElementById(FILTER_STYLE_ID),
-  ].filter(Boolean) as HTMLStyleElement[];
-
-  for (const sheet of sheets) {
-    sheet.disabled = true;
-  }
+function withSheetsDisabled<T>(doc: Document, fn: () => T): T {
+  const sheets = [EXTENSION_STYLE_ID, INVERT_STYLE_ID, FLASH_STYLE_ID]
+    .map((id) => doc.getElementById(id))
+    .filter(Boolean) as HTMLStyleElement[];
+  for (const sheet of sheets) sheet.disabled = true;
   try {
     return fn();
   } finally {
-    for (const sheet of sheets) {
-      sheet.disabled = false;
-    }
+    for (const sheet of sheets) sheet.disabled = false;
   }
 }
 
 /**
- * Native scheme strategy assumes the MAIN-world script already forced
- * prefers-color-scheme: dark. This strategy only samples whether the page
- * ended up dark and reports handled if so.
+ * Ask the page to prefer dark: flips the shared attribute that the MAIN-world
+ * script watches (matchMedia + `prefers-color-scheme` rules), then samples
+ * whether the page actually ended up dark.
  */
 export const nativeSchemeStrategy: PageThemeStrategy = {
   id: 'native',
 
   async apply(page: PageContext): Promise<StrategyResult> {
-    page.document.documentElement.setAttribute(ROOT_SCHEME_ATTR, 'pending');
-    page.document.documentElement.style.setProperty('color-scheme', 'dark');
+    const doc = page.document;
+    const root = doc.documentElement;
+    root.setAttribute(ROOT_SCHEME_ATTR, 'pending');
+    root.setAttribute(SCHEME_ATTR, 'on');
+    root.style.setProperty('color-scheme', 'dark');
 
-    await waitFor('DOMContentLoaded');
-
-    const check = () =>
-      withSheetsDisabled(() => samplePageIsDark(page.document));
-
-    if (check()) {
-      page.document.documentElement.setAttribute(ROOT_SCHEME_ATTR, 'native');
-      return 'handled';
-    }
-
-    await waitFor('load');
-    if (check()) {
-      page.document.documentElement.setAttribute(ROOT_SCHEME_ATTR, 'native');
-      return 'handled';
-    }
-
-    if (hasFrameworkRoot(page.document)) {
-      await delay(500);
-      if (check()) {
-        page.document.documentElement.setAttribute(ROOT_SCHEME_ATTR, 'native');
-        return 'handled';
+    if (!root.hasAttribute(SCHEME_READY_ATTR)) {
+      try {
+        await browser.runtime.sendMessage({ type: 'ENSURE_SCHEME' });
+      } catch {
+        // Extension context may be gone.
       }
     }
 
+    await whenParsed(doc);
+    await delay(60); // let the MAIN script rewrite media rules
+    if (withSheetsDisabled(doc, () => samplePageIsDark(doc))) {
+      root.setAttribute(ROOT_SCHEME_ATTR, 'native');
+      return 'handled';
+    }
+
+    if (hasFrameworkRoot(doc)) {
+      await delay(500);
+      if (withSheetsDisabled(doc, () => samplePageIsDark(doc))) {
+        root.setAttribute(ROOT_SCHEME_ATTR, 'native');
+        return 'handled';
+      }
+    }
     return 'continue';
   },
 
   revert(page: PageContext): void {
-    page.document.documentElement.removeAttribute(ROOT_SCHEME_ATTR);
-    page.document.documentElement.style.removeProperty('color-scheme');
+    const root = page.document.documentElement;
+    root.removeAttribute(SCHEME_ATTR);
+    const attr = root.getAttribute(ROOT_SCHEME_ATTR);
+    if (attr === 'native' || attr === 'pending') {
+      root.removeAttribute(ROOT_SCHEME_ATTR);
+    }
+    root.style.removeProperty('color-scheme');
   },
 };

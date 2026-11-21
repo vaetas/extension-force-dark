@@ -1,45 +1,46 @@
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_SETTINGS,
-  isOriginEnabled,
-  setEnabledForAll,
-  setOriginEnabled,
+  modeFor,
+  normalizeSettings,
+  setDefaultMode,
+  setSiteMode,
 } from './settings';
 
-describe('isOriginEnabled', () => {
-  it('enables all origins when master switch is on', () => {
-    expect(
-      isOriginEnabled(DEFAULT_SETTINGS, 'https://example.com'),
-    ).toBe(true);
-  });
-
-  it('respects disabledOrigins when master switch is on', () => {
-    const settings = setOriginEnabled(
-      DEFAULT_SETTINGS,
-      'https://example.com',
-      false,
+describe('modeFor', () => {
+  it('uses the default when a site has no override', () => {
+    expect(modeFor(DEFAULT_SETTINGS, 'example.com')).toBe('off');
+    expect(modeFor(setDefaultMode(DEFAULT_SETTINGS, 'auto'), 'a.com')).toBe(
+      'auto',
     );
-    expect(isOriginEnabled(settings, 'https://example.com')).toBe(false);
-    expect(isOriginEnabled(settings, 'https://other.com')).toBe(true);
   });
 
-  it('requires enabledOrigins when master switch is off', () => {
-    const off = setEnabledForAll(DEFAULT_SETTINGS, false);
-    expect(isOriginEnabled(off, 'https://example.com')).toBe(false);
-
-    const onSite = setOriginEnabled(off, 'https://example.com', true);
-    expect(isOriginEnabled(onSite, 'https://example.com')).toBe(true);
-    expect(isOriginEnabled(onSite, 'https://other.com')).toBe(false);
+  it('prefers the site override, including an explicit off', () => {
+    const auto = setDefaultMode(DEFAULT_SETTINGS, 'auto');
+    const s = setSiteMode(auto, 'a.com', 'off');
+    expect(modeFor(s, 'a.com')).toBe('off');
+    expect(modeFor(s, 'b.com')).toBe('auto');
   });
 
-  it('re-enables a previously disabled origin', () => {
-    const disabled = setOriginEnabled(
-      DEFAULT_SETTINGS,
-      'https://example.com',
-      false,
-    );
-    const enabled = setOriginEnabled(disabled, 'https://example.com', true);
-    expect(enabled.disabledOrigins).toEqual([]);
-    expect(isOriginEnabled(enabled, 'https://example.com')).toBe(true);
+  it('removes an override with null', () => {
+    const s = setSiteMode(setSiteMode(DEFAULT_SETTINGS, 'a.com', 'invert'), 'a.com', null);
+    expect(s.sites).toEqual({});
+  });
+});
+
+describe('normalizeSettings', () => {
+  it('returns defaults for garbage', () => {
+    expect(normalizeSettings(undefined)).toEqual(DEFAULT_SETTINGS);
+    expect(normalizeSettings({ sites: { 'a.com': 'bogus' } }).sites).toEqual({});
+  });
+
+  it('migrates the legacy origin lists', () => {
+    const s = normalizeSettings({
+      enabledForAll: true,
+      enabledOrigins: ['https://a.com'],
+      disabledOrigins: ['https://b.com:8080'],
+    });
+    expect(s.defaultMode).toBe('auto');
+    expect(s.sites).toEqual({ 'a.com': 'auto', 'b.com': 'off' });
   });
 });

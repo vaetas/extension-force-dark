@@ -1,13 +1,19 @@
 import { shouldSkipFrame } from '../src/guards/page-guard';
 import {
+  SCHEME_ATTR,
+  SCHEME_READY_ATTR,
+} from '../src/theme/css-utils';
+import {
   forceDarkColorSchemeMedia,
   isPrintMedia,
   mediaMentionsColorScheme,
 } from '../src/theme/scheme-media';
 
 /**
- * MAIN-world script: patch matchMedia and accessible CSS media queries
- * before page scripts run. Registered dynamically with runAt document_start.
+ * MAIN-world script. Makes the page believe the system prefers dark while the
+ * `data-force-dark-scheme="on"` attribute is present on <html>, and undoes
+ * everything when the isolated-world script removes it. Registered for
+ * "auto" sites at document_start, or injected on demand.
  */
 export default defineContentScript({
   matches: ['http://*/*', 'https://*/*'],
@@ -23,53 +29,39 @@ export default defineContentScript({
     flagHost.__forceDarkScheme = true;
 
     const realMatchMedia = window.matchMedia.bind(window);
+    const isOn = (): boolean =>
+      document.documentElement?.getAttribute(SCHEME_ATTR) === 'on';
 
+    // ---- matchMedia -------------------------------------------------------
     const patchMediaQueryList = (
-      mql: MediaQueryList,
-      forcedMatches: boolean,
-      mediaLabel: string,
+      real: MediaQueryList,
+      forced: MediaQueryList,
+      label: string,
     ): MediaQueryList => {
       const listeners = new Map<
         EventListenerOrEventListenerObject,
         EventListener
       >();
+      const matches = (): boolean => (isOn() ? forced.matches : real.matches);
 
       const proxy = {
         get matches() {
-          return forcedMatches;
+          return matches();
         },
         get media() {
-          return mediaLabel;
+          return label;
         },
         get onchange() {
-          return mql.onchange;
+          return real.onchange;
         },
         set onchange(handler: MediaQueryList['onchange']) {
-          mql.onchange = handler;
+          real.onchange = handler;
         },
         addListener(listener: (this: MediaQueryList, ev: MediaQueryListEvent) => void) {
-          const wrapped = () => {
-            listener.call(
-              proxy as unknown as MediaQueryList,
-              {
-                matches: forcedMatches,
-                media: mql.media,
-              } as MediaQueryListEvent,
-            );
-          };
-          listeners.set(listener as EventListenerOrEventListenerObject, wrapped);
-          mql.addListener(wrapped);
+          this.addEventListener('change', listener as EventListener);
         },
         removeListener(listener: (this: MediaQueryList, ev: MediaQueryListEvent) => void) {
-          const wrapped = listeners.get(
-            listener as EventListenerOrEventListenerObject,
-          );
-          if (wrapped) {
-            mql.removeListener(wrapped);
-            listeners.delete(listener as EventListenerOrEventListenerObject);
-          } else {
-            mql.removeListener(listener);
-          }
+          this.removeEventListener('change', listener as EventListener);
         },
         addEventListener(
           type: string,
@@ -77,212 +69,215 @@ export default defineContentScript({
           options?: boolean | AddEventListenerOptions,
         ) {
           if (type !== 'change') {
-            mql.addEventListener(type, listener as EventListener, options);
+            real.addEventListener(type, listener as EventListener, options);
             return;
           }
           const wrapped: EventListener = () => {
             const event = new Event('change') as MediaQueryListEvent;
-            Object.defineProperty(event, 'matches', { value: forcedMatches });
-            Object.defineProperty(event, 'media', { value: mql.media });
-            if (typeof listener === 'function') {
-              listener.call(proxy, event);
-            } else {
-              listener.handleEvent(event);
-            }
+            Object.defineProperty(event, 'matches', { value: matches() });
+            Object.defineProperty(event, 'media', { value: label });
+            if (typeof listener === 'function') listener.call(proxy, event);
+            else listener.handleEvent(event);
           };
           listeners.set(listener, wrapped);
-          mql.addEventListener('change', wrapped, options);
+          real.addEventListener('change', wrapped, options);
         },
         removeEventListener(
           type: string,
           listener: EventListenerOrEventListenerObject,
           options?: boolean | EventListenerOptions,
         ) {
-          const wrapped = listeners.get(listener);
+          const wrapped = type === 'change' ? listeners.get(listener) : undefined;
           if (wrapped) {
-            mql.removeEventListener(type, wrapped, options);
+            real.removeEventListener('change', wrapped, options);
             listeners.delete(listener);
           } else {
-            mql.removeEventListener(type, listener as EventListener, options);
+            real.removeEventListener(type, listener as EventListener, options);
           }
         },
         dispatchEvent(event: Event) {
-          return mql.dispatchEvent(event);
+          return real.dispatchEvent(event);
         },
       };
-
       return proxy as unknown as MediaQueryList;
     };
 
     window.matchMedia = ((query: string): MediaQueryList => {
-      if (!mediaMentionsColorScheme(query) || isPrintMedia(query)) {
-        return realMatchMedia(query);
-      }
+      const real = realMatchMedia(query);
+      if (!mediaMentionsColorScheme(query) || isPrintMedia(query)) return real;
       const forced = realMatchMedia(forceDarkColorSchemeMedia(query));
-      return patchMediaQueryList(forced, forced.matches, query);
+      return patchMediaQueryList(real, forced, query);
     }) as typeof window.matchMedia;
 
-    // Force color-scheme early for light-dark() and form controls.
-    const applyRootScheme = () => {
-      try {
-        document.documentElement.style.setProperty('color-scheme', 'dark');
-      } catch {
-        // ignore
-      }
-    };
-    applyRootScheme();
+    // ---- CSSOM @media rewriting (reversible) ------------------------------
+    const originalMedia = new Map<CSSMediaRule, string>();
+    const originalAttr = new Map<Element, string>();
+    let setColorScheme = false;
 
-    const rewriteRuleList = (rules: CSSRuleList) => {
+    const rewriteRuleList = (rules: CSSRuleList): void => {
       for (const rule of Array.from(rules)) {
         if (rule instanceof CSSMediaRule) {
-          const mediaText = rule.media.mediaText;
-          const forced = forceDarkColorSchemeMedia(mediaText);
-          if (forced !== mediaText) {
+          const text = rule.media.mediaText;
+          const forced = forceDarkColorSchemeMedia(text);
+          if (forced !== text) {
+            if (!originalMedia.has(rule)) originalMedia.set(rule, text);
             try {
               rule.media.mediaText = forced;
             } catch {
-              try {
-                const length = rule.media.length;
-                for (let i = length - 1; i >= 0; i -= 1) {
-                  rule.media.deleteMedium(rule.media.item(i)!);
-                }
-                for (const part of forced.split(',')) {
-                  const medium = part.trim();
-                  if (medium) rule.media.appendMedium(medium);
-                }
-              } catch {
-                // ignore
-              }
+              // ignore
             }
           }
         }
-
         if ('cssRules' in rule && rule.cssRules) {
           try {
             rewriteRuleList(rule.cssRules as CSSRuleList);
           } catch {
-            // ignore nested rules we cannot read
+            // ignore
           }
         }
       }
     };
 
-    let rewriteDepth = 0;
-    const rewriteSheetMedia = (sheet: CSSStyleSheet) => {
-      if (rewriteDepth > 0) return;
-      rewriteDepth += 1;
+    let rewriting = false;
+    const rewriteSheet = (sheet: CSSStyleSheet): void => {
+      if (rewriting) return;
+      rewriting = true;
       try {
         rewriteRuleList(sheet.cssRules);
       } catch {
         // Cross-origin sheets are unreadable.
       } finally {
-        rewriteDepth -= 1;
+        rewriting = false;
       }
     };
 
-    const rewriteAllSheets = () => {
-      for (const sheet of Array.from(document.styleSheets)) {
-        rewriteSheetMedia(sheet);
-      }
-      const adopted = document.adoptedStyleSheets;
-      if (adopted) {
-        for (const sheet of adopted) rewriteSheetMedia(sheet);
-      }
-    };
-
-    const rewriteMediaAttributes = () => {
-      const nodes = document.querySelectorAll<HTMLElement>(
-        'link[media], source[media], style[media], iframe[media]',
-      );
-      for (const node of nodes) {
+    const rewriteAll = (): void => {
+      if (!isOn()) return;
+      for (const sheet of Array.from(document.styleSheets)) rewriteSheet(sheet);
+      for (const sheet of document.adoptedStyleSheets ?? []) rewriteSheet(sheet);
+      for (const node of document.querySelectorAll<HTMLElement>(
+        'link[media], source[media], style[media]',
+      )) {
         const media = node.getAttribute('media');
         if (!media) continue;
         const forced = forceDarkColorSchemeMedia(media);
-        if (forced !== media) node.setAttribute('media', forced);
+        if (forced !== media) {
+          if (!originalAttr.has(node)) originalAttr.set(node, media);
+          node.setAttribute('media', forced);
+        }
       }
     };
 
-    const boot = () => {
-      rewriteAllSheets();
-      rewriteMediaAttributes();
+    const engage = (): void => {
+      try {
+        const style = document.documentElement.style;
+        if (!style.getPropertyValue('color-scheme')) {
+          style.setProperty('color-scheme', 'dark');
+          setColorScheme = true;
+        }
+      } catch {
+        // ignore
+      }
+      rewriteAll();
     };
 
-    if (document.documentElement) {
-      boot();
-    }
-    document.addEventListener('DOMContentLoaded', boot, { once: true });
-    window.addEventListener('load', boot, { once: true });
-    document.addEventListener(
-      'load',
-      (event) => {
-        if (event.target instanceof HTMLLinkElement) boot();
-      },
-      true,
-    );
-
-    let rewriteScheduled = false;
-    const scheduleRewrite = () => {
-      if (rewriteScheduled) return;
-      rewriteScheduled = true;
-      requestAnimationFrame(() => {
-        rewriteScheduled = false;
-        boot();
-      });
+    const disengage = (): void => {
+      for (const [rule, text] of originalMedia) {
+        try {
+          rule.media.mediaText = text;
+        } catch {
+          // ignore
+        }
+      }
+      originalMedia.clear();
+      for (const [node, media] of originalAttr) node.setAttribute('media', media);
+      originalAttr.clear();
+      if (setColorScheme) {
+        document.documentElement.style.removeProperty('color-scheme');
+        setColorScheme = false;
+      }
     };
 
     try {
       const originalInsertRule = CSSStyleSheet.prototype.insertRule;
-      CSSStyleSheet.prototype.insertRule = function (
-        rule: string,
-        index?: number,
-      ) {
+      CSSStyleSheet.prototype.insertRule = function (rule: string, index?: number) {
         const result = originalInsertRule.call(this, rule, index);
-        rewriteSheetMedia(this);
+        if (isOn()) rewriteSheet(this);
         return result;
       };
     } catch {
       // Some pages lock the stylesheet prototype.
     }
 
+    let scheduled = false;
+    const schedule = (): void => {
+      if (scheduled) return;
+      scheduled = true;
+      requestAnimationFrame(() => {
+        scheduled = false;
+        rewriteAll();
+      });
+    };
+
+    let wasOn = false;
     const observer = new MutationObserver((mutations) => {
+      const on = isOn();
+      if (on !== wasOn) {
+        wasOn = on;
+        if (on) engage();
+        else disengage();
+        return;
+      }
+      if (!on) return;
       for (const mutation of mutations) {
         if (mutation.type === 'attributes') {
-          scheduleRewrite();
-          applyRootScheme();
-          return;
+          if (mutation.attributeName === 'media') schedule();
+          continue;
         }
         for (const node of Array.from(mutation.addedNodes)) {
-          if (!(node instanceof Element)) continue;
           if (
-            node.matches('style, link, source, iframe') ||
-            node.querySelector('style, link, source, iframe')
+            node instanceof Element &&
+            (node.matches('style, link') || node.querySelector('style, link'))
           ) {
-            scheduleRewrite();
-            applyRootScheme();
+            schedule();
             return;
           }
         }
       }
     });
 
-    const startObserver = () => {
-      if (!document.documentElement) return;
-      observer.observe(document.documentElement, {
+    const start = (): void => {
+      const root = document.documentElement;
+      if (!root) return;
+      // A script registered for this host means "on" until told otherwise.
+      if (!root.hasAttribute(SCHEME_ATTR)) root.setAttribute(SCHEME_ATTR, 'on');
+      root.setAttribute(SCHEME_READY_ATTR, '1');
+      observer.observe(root, {
         childList: true,
         subtree: true,
         attributes: true,
-        attributeFilter: ['media'],
+        attributeFilter: [SCHEME_ATTR, 'media'],
       });
-      boot();
+      wasOn = isOn();
+      if (wasOn) engage();
+      document.addEventListener('DOMContentLoaded', rewriteAll, { once: true });
+      window.addEventListener('load', rewriteAll, { once: true });
+      document.addEventListener(
+        'load',
+        (event) => {
+          if (event.target instanceof HTMLLinkElement) rewriteAll();
+        },
+        true,
+      );
     };
 
     if (document.documentElement) {
-      startObserver();
+      start();
     } else {
       const htmlObserver = new MutationObserver(() => {
         if (document.documentElement) {
           htmlObserver.disconnect();
-          startObserver();
+          start();
         }
       });
       htmlObserver.observe(document, { childList: true });

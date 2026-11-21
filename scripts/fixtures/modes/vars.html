@@ -1,0 +1,10 @@
+<!doctype html><html><head><title>vars</title>
+<style>
+:root { --bg: #ffffff; --text: #212529; --card: #f8f9fa; --rgb-surface: 255, 255, 255; --line: #dee2e6; }
+body { background: var(--bg); color: var(--text); font-family: sans-serif; }
+.card { background: var(--card); border: 1px solid var(--line); padding: 12px; }
+.chip { background: rgb(var(--rgb-surface)); color: var(--text); }
+.hero { background: url(#nothing) #ffffff no-repeat; color: #111; }
+@media (max-width: 300px) { body { background: #ff0000; } }
+</style></head>
+<body><h1>Vars</h1><div class="card" id="card">card</div><div class="chip" id="chip">chip</div><div class="hero" id="hero">hero</div></body></html>

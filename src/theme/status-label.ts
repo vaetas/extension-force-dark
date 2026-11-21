@@ -1,23 +1,23 @@
-import type { PageThemeStatus } from '../storage/settings';
+import type { PageThemeStatus, SiteMode } from '../storage/settings';
 
 export function statusLabel(
   status: PageThemeStatus | null,
-  enabled: boolean,
+  mode: SiteMode,
 ): string {
-  if (!enabled) return 'Off for this site';
+  if (mode === 'off') return 'Off for this site';
   switch (status) {
     case 'native':
-      return 'Using this site’s dark theme';
+      return 'Using this site’s own dark theme';
     case 'recolor':
       return 'Recoloring this page';
-    case 'filter':
-      return 'Approximated with a filter';
+    case 'invert':
+      return 'Inverting this page';
     case 'blocked':
       return 'This page can’t be changed';
+    case 'pending':
     case 'off':
-    case 'idle':
-      return 'Updating…';
+      return 'Applying…';
     default:
-      return 'Force dark is enabled';
+      return 'Waiting for the page…';
   }
 }

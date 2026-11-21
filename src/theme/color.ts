@@ -387,36 +387,62 @@ export function roleForProperty(property: string): ColorRole | null {
 const COLOR_TOKEN_RE =
   /#(?:[0-9a-f]{3,8})\b|rgba?\([^)]+\)|hsla?\([^)]+\)|oklch\([^)]+\)|oklab\([^)]+\)|lab\([^)]+\)|lch\([^)]+\)|color\([^)]+\)|\b(?:transparent|currentcolor|inherit|black|white|red|blue|green|gray|grey|silver|maroon|purple|fuchsia|lime|olive|yellow|navy|teal|aqua|orange|aliceblue|antiquewhite|aquamarine|azure|beige|bisque|blanchedalmond|blueviolet|brown|burlywood|cadetblue|chartreuse|chocolate|coral|cornflowerblue|cornsilk|crimson|cyan|darkblue|darkcyan|darkgoldenrod|darkgray|darkgreen|darkgrey|darkkhaki|darkmagenta|darkolivegreen|darkorange|darkorchid|darkred|darksalmon|darkseagreen|darkslateblue|darkslategray|darkslategrey|darkturquoise|darkviolet|deeppink|deepskyblue|dimgray|dimgrey|dodgerblue|firebrick|floralwhite|forestgreen|gainsboro|ghostwhite|gold|goldenrod|greenyellow|honeydew|hotpink|indianred|indigo|ivory|khaki|lavender|lavenderblush|lawngreen|lemonchiffon|lightblue|lightcoral|lightcyan|lightgoldenrodyellow|lightgray|lightgreen|lightgrey|lightpink|lightsalmon|lightseagreen|lightskyblue|lightslategray|lightslategrey|lightsteelblue|lightyellow|limegreen|linen|magenta|mediumaquamarine|mediumblue|mediumorchid|mediumpurple|mediumseagreen|mediumslateblue|mediumspringgreen|mediumturquoise|mediumvioletred|midnightblue|mintcream|mistyrose|moccasin|navajowhite|oldlace|olivedrab|orangered|orchid|palegoldenrod|palegreen|paleturquoise|palevioletred|papayawhip|peachpuff|peru|pink|plum|powderblue|rosybrown|royalblue|saddlebrown|salmon|sandybrown|seagreen|seashell|sienna|skyblue|slateblue|slategray|slategrey|snow|springgreen|steelblue|tan|thistle|tomato|turquoise|violet|wheat|whitesmoke|yellowgreen)\b/gi;
 
+const PROTECT_OR_COLOR_RE = new RegExp(
+  `(url\\([^)]*\\)|--[\\w-]+)|(${COLOR_TOKEN_RE.source})`,
+  'gi',
+);
+
+/**
+ * Rewrite literal colors in a declaration value. `url(...)` segments and
+ * custom property names are left alone; colors inside var() fallbacks are
+ * rewritten. Returns null when nothing changed.
+ */
 export function rewriteColorsInValue(
   value: string,
   role: ColorRole,
 ): string | null {
-  if (!value || value.includes('var(')) {
-    return null;
-  }
-
-  // Leave pure url(...) backgrounds untouched.
-  if (/^url\(/i.test(value.trim()) && !/gradient/i.test(value)) {
-    return null;
-  }
+  if (!value) return null;
 
   let changed = false;
-  const rewritten = value.replace(COLOR_TOKEN_RE, (token) => {
-    const lower = token.toLowerCase();
-    if (
-      lower === 'currentcolor' ||
-      lower === 'inherit' ||
-      lower === 'transparent'
-    ) {
-      return token;
-    }
-    const parsed = parseColor(token);
-    if (!parsed) return token;
-    changed = true;
-    return modifyColorToString(parsed, role);
-  });
+  const rewritten = value.replace(
+    PROTECT_OR_COLOR_RE,
+    (token: string, protectedPart: string | undefined) => {
+      if (protectedPart) return token;
+      const lower = token.toLowerCase();
+      if (
+        lower === 'currentcolor' ||
+        lower === 'inherit' ||
+        lower === 'transparent'
+      ) {
+        return token;
+      }
+      const parsed = parseColor(token);
+      if (!parsed) return token;
+      changed = true;
+      return modifyColorToString(parsed, role);
+    },
+  );
 
   return changed ? rewritten : null;
+}
+
+const CHANNELS_RE =
+  /^\s*(\d{1,3}(?:\.\d+)?)(\s*,\s*|\s+)(\d{1,3}(?:\.\d+)?)\2(\d{1,3}(?:\.\d+)?)\s*$/;
+
+/** `255, 255, 255` / `255 255 255` custom property values used as rgb(var(--x)). */
+export function rewriteChannelTriplet(
+  value: string,
+  role: ColorRole,
+): string | null {
+  const m = CHANNELS_RE.exec(value);
+  if (!m) return null;
+  const r = Number(m[1]);
+  const g = Number(m[3]);
+  const b = Number(m[4]);
+  if ([r, g, b].some((c) => c > 255)) return null;
+  const out = modifyColor({ r, g, b, a: 1 }, role);
+  const sep = m[2].includes(',') ? ', ' : ' ';
+  return [out.r, out.g, out.b].map((c) => Math.round(c)).join(sep);
 }
 
 export function isColorProperty(property: string): boolean {

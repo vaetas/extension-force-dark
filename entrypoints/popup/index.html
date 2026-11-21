@@ -13,17 +13,35 @@
         <p id="host" class="host">—</p>
       </header>
 
-      <label class="row">
-        <span>This site</span>
-        <input id="site-toggle" type="checkbox" />
-      </label>
+      <section>
+        <div id="modes" class="modes" role="radiogroup" aria-label="Mode for this site">
+          <button type="button" data-mode="off" role="radio">Off</button>
+          <button type="button" data-mode="auto" role="radio" title="Use the site's own dark theme if it has one, otherwise recolor, otherwise invert">Auto</button>
+          <button type="button" data-mode="recolor" role="radio" title="Rewrite the page's colors">Recolor</button>
+          <button type="button" data-mode="invert" role="radio" title="Invert everything — works on anything">Invert</button>
+        </div>
+        <p id="status" class="status">Checking…</p>
+        <button id="reset" type="button" class="link" hidden>Use default for this site</button>
+      </section>
 
-      <label class="row">
-        <span>All websites</span>
-        <input id="global-toggle" type="checkbox" />
-      </label>
+      <section class="defaults">
+        <label class="row">
+          <span>Default for other sites</span>
+          <select id="default-mode">
+            <option value="off">Off</option>
+            <option value="auto">Auto</option>
+            <option value="recolor">Recolor</option>
+            <option value="invert">Invert</option>
+          </select>
+        </label>
+      </section>
 
-      <p id="status" class="status">Checking…</p>
+      <details id="sites-details" class="sites" hidden>
+        <summary>Sites with custom settings (<span id="sites-count">0</span>)</summary>
+        <ul id="sites-list"></ul>
+      </details>
+
+      <p class="hint">Shortcut: <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>D</kbd> toggles this site</p>
     </main>
     <script type="module" src="./main.ts"></script>
   </body>

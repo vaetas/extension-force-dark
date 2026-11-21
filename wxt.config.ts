@@ -5,11 +5,17 @@ export default defineConfig({
   entrypointsDir: 'entrypoints',
   manifest: {
     name: 'Force Dark',
-    description: 'Toggle a forced dark theme for the current website',
+    description: 'Force a dark theme on the website you are viewing',
     permissions: ['storage', 'scripting', 'tabs'],
     host_permissions: ['http://*/*', 'https://*/*'],
     action: {
       default_title: 'Force Dark',
+    },
+    commands: {
+      'toggle-site': {
+        suggested_key: { default: 'Alt+Shift+D' },
+        description: 'Toggle forced dark for the current site',
+      },
     },
   },
 });

@@ -1,149 +1,127 @@
-import { isRestrictedUrl, isTransientUrl, originFromUrl } from '../../src/guards/page-guard';
+import { hostFromUrl, isRestrictedUrl } from '../../src/guards/page-guard';
 import {
   getTabThemeState,
-  isOriginEnabled,
+  isSiteMode,
   loadSettings,
+  modeFor,
   saveSettings,
-  setEnabledForAll,
-  setOriginEnabled,
-  type ForceDarkSettings,
+  setDefaultMode,
+  setSiteMode,
+  SETTINGS_STORAGE_KEY,
+  type SiteMode,
 } from '../../src/storage/settings';
 import { statusLabel } from '../../src/theme/status-label';
 
-const hostEl = document.getElementById('host') as HTMLParagraphElement;
-const statusEl = document.getElementById('status') as HTMLParagraphElement;
-const siteToggle = document.getElementById('site-toggle') as HTMLInputElement;
-const globalToggle = document.getElementById(
-  'global-toggle',
-) as HTMLInputElement;
+const hostEl = document.getElementById('host') as HTMLElement;
+const statusEl = document.getElementById('status') as HTMLElement;
+const modesEl = document.getElementById('modes') as HTMLElement;
+const resetEl = document.getElementById('reset') as HTMLButtonElement;
+const defaultSelect = document.getElementById('default-mode') as HTMLSelectElement;
+const sitesDetails = document.getElementById('sites-details') as HTMLDetailsElement;
+const sitesCount = document.getElementById('sites-count') as HTMLElement;
+const sitesList = document.getElementById('sites-list') as HTMLUListElement;
+const modeButtons = Array.from(
+  modesEl.querySelectorAll<HTMLButtonElement>('button[data-mode]'),
+);
 
-let renderGeneration = 0;
+let currentHost: string | null = null;
 let writeChain: Promise<void> = Promise.resolve();
-let shownOrigin: string | null = null;
 
-function enqueueSettingsWrite(task: () => Promise<void>): void {
-  writeChain = writeChain.then(task).catch((error) => {
-    console.warn('[ForceDark] settings write failed', error);
-  });
+function mutateSettings(
+  change: (s: Awaited<ReturnType<typeof loadSettings>>) => Awaited<ReturnType<typeof loadSettings>>,
+): void {
+  writeChain = writeChain
+    .then(async () => saveSettings(change(await loadSettings())))
+    .catch((error) => console.warn('[ForceDark] save failed', error));
 }
 
 async function getActiveTab() {
-  const tabs = await browser.tabs.query({ active: true, currentWindow: true });
-  return tabs[0] ?? null;
-}
-
-async function applySettings(next: ForceDarkSettings): Promise<void> {
-  // Background re-registers scripts, then reloads the active tab.
-  await saveSettings(next);
+  const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+  return tab ?? null;
 }
 
 async function render(): Promise<void> {
-  const generation = ++renderGeneration;
   const settings = await loadSettings();
   const tab = await getActiveTab();
-  if (generation !== renderGeneration) return;
 
-  globalToggle.checked = settings.enabledForAll;
+  defaultSelect.value = settings.defaultMode;
 
   const url = tab?.url;
-  if (tab?.id == null || !url || isTransientUrl(url)) {
-    siteToggle.disabled = true;
-    statusEl.textContent = 'Updating…';
-    return;
+  const host = url && !isRestrictedUrl(url) ? hostFromUrl(url) : null;
+  currentHost = host;
+
+  for (const button of modeButtons) button.disabled = !host;
+  resetEl.hidden = true;
+
+  if (!host || tab?.id == null) {
+    hostEl.textContent = 'No changeable page open';
+    statusEl.textContent = 'Browser pages and stores can’t be themed.';
+    for (const button of modeButtons) button.setAttribute('aria-checked', 'false');
+  } else {
+    hostEl.textContent = host;
+    const mode = modeFor(settings, host);
+    for (const button of modeButtons) {
+      button.setAttribute('aria-checked', String(button.dataset.mode === mode));
+    }
+    resetEl.hidden = !(host in settings.sites);
+
+    const state = await getTabThemeState(tab.id);
+    const status = state && state.host === host ? state.status : null;
+    statusEl.textContent = statusLabel(status, mode);
   }
 
-  if (isRestrictedUrl(url)) {
-    shownOrigin = null;
-    hostEl.textContent = 'This page can’t be changed';
-    siteToggle.checked = false;
-    siteToggle.disabled = true;
-    statusEl.textContent = 'This page can’t be changed';
-    return;
-  }
-
-  const origin = originFromUrl(url);
-  if (!origin) {
-    shownOrigin = null;
-    hostEl.textContent = 'No active site';
-    siteToggle.checked = false;
-    siteToggle.disabled = true;
-    statusEl.textContent = 'This page can’t be changed';
-    return;
-  }
-  shownOrigin = origin;
-
-  let host = origin;
-  try {
-    host = new URL(origin).host;
-  } catch {
-    // keep origin
-  }
-  hostEl.textContent = host;
-
-  const enabled = isOriginEnabled(settings, origin);
-  siteToggle.disabled = false;
-  siteToggle.checked = enabled;
-
-  const state = await getTabThemeState(tab.id);
-  if (generation !== renderGeneration) return;
-  statusEl.textContent = statusLabel(state?.status ?? null, enabled);
+  const entries = Object.entries(settings.sites).sort(([a], [b]) => a.localeCompare(b));
+  sitesDetails.hidden = entries.length === 0;
+  sitesCount.textContent = String(entries.length);
+  sitesList.replaceChildren(
+    ...entries.map(([siteHost, siteMode]) => {
+      const li = document.createElement('li');
+      const name = document.createElement('span');
+      name.className = 'name';
+      name.textContent = siteHost;
+      const mode = document.createElement('span');
+      mode.className = 'mode';
+      mode.textContent = siteMode;
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.title = 'Use default for this site';
+      remove.textContent = '✕';
+      remove.addEventListener('click', () =>
+        mutateSettings((s) => setSiteMode(s, siteHost, null)),
+      );
+      li.append(name, mode, remove);
+      return li;
+    }),
+  );
 }
 
-siteToggle.addEventListener('change', () => {
-  const enabled = siteToggle.checked;
-  const originHint = shownOrigin;
-  renderGeneration += 1;
-  enqueueSettingsWrite(async () => {
-    const settings = await loadSettings();
-    let origin = originHint;
-    if (!origin) {
-      const tab = await getActiveTab();
-      if (
-        !tab?.url ||
-        tab.id == null ||
-        isTransientUrl(tab.url) ||
-        isRestrictedUrl(tab.url)
-      ) {
-        return;
-      }
-      origin = originFromUrl(tab.url);
-    }
-    if (!origin) return;
-    await applySettings(setOriginEnabled(settings, origin, enabled));
-    await render();
-  });
+modesEl.addEventListener('click', (event) => {
+  const button = (event.target as Element).closest<HTMLButtonElement>('button[data-mode]');
+  const mode = button?.dataset.mode;
+  if (!button || !currentHost || !isSiteMode(mode)) return;
+  const host = currentHost;
+  // Reflect immediately; storage change re-renders with the real status.
+  for (const b of modeButtons) b.setAttribute('aria-checked', String(b === button));
+  statusEl.textContent = mode === 'off' ? 'Off for this site' : 'Applying…';
+  mutateSettings((s) => setSiteMode(s, host, mode as SiteMode));
 });
 
-globalToggle.addEventListener('change', () => {
-  const enabledForAll = globalToggle.checked;
-  renderGeneration += 1;
-  enqueueSettingsWrite(async () => {
-    const settings = await loadSettings();
-    await applySettings(setEnabledForAll(settings, enabledForAll));
-    await render();
-  });
+resetEl.addEventListener('click', () => {
+  if (!currentHost) return;
+  const host = currentHost;
+  mutateSettings((s) => setSiteMode(s, host, null));
+});
+
+defaultSelect.addEventListener('change', () => {
+  const mode = defaultSelect.value;
+  if (isSiteMode(mode)) mutateSettings((s) => setDefaultMode(s, mode));
 });
 
 browser.storage.onChanged.addListener((changes, area) => {
-  if (area === 'local' && changes.forceDarkSettings) {
-    void render();
-    return;
-  }
-  if (
-    area === 'session' &&
-    Object.keys(changes).some((key) => key.startsWith('tabTheme:'))
-  ) {
+  if (area === 'local' && changes[SETTINGS_STORAGE_KEY]) void render();
+  else if (area === 'session' && Object.keys(changes).some((k) => k.startsWith('tabTheme:'))) {
     void render();
   }
-});
-
-browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (changeInfo.status !== 'complete' && !changeInfo.url) return;
-  void (async () => {
-    const active = await getActiveTab();
-    if (active?.id !== tabId) return;
-    await render();
-  })();
 });
 
 void render();

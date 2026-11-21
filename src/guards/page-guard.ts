@@ -89,3 +89,13 @@ export function originFromUrl(url: string): string | null {
     return null;
   }
 }
+
+export function hostFromUrl(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+    return parsed.hostname || null;
+  } catch {
+    return null;
+  }
+}

@@ -1,50 +1,36 @@
 import type { FetchStylesheetResponse } from '../../messaging/protocol';
 import {
-  ensureContrast,
-  parseColor,
-  rewriteColorsInValue,
-  roleForProperty,
-} from '../color';
-import {
+  BASE_LAYER_CSS,
   buildOverrideSheet,
-  collectVariableUsages,
+  computeVariableRoles,
+  declarationsOf,
   EXTENSION_STYLE_ID,
   ROOT_SCHEME_ATTR,
+  rewriteDeclarations,
+  rewriteValueForRole,
   shouldProcessProperty,
   walkStyleRules,
   type CssOverride,
 } from '../css-utils';
-import type {
-  ColorRole,
-  PageContext,
-  PageThemeStrategy,
-  StrategyResult,
-} from '../types';
+import { roleForProperty } from '../color';
+import type { PageContext, PageThemeStrategy, StrategyResult } from '../types';
 
-interface InlineBackup {
-  element: HTMLElement;
-  property: string;
-  value: string;
-  priority: string;
-}
+type Scope = Document | ShadowRoot;
 
 const MAX_SHEET_BYTES = 2 * 1024 * 1024;
 const sheetCache = new Map<string, string>();
-/** Our own published override sheets — must never be re-processed as input. */
+/** Our own override sheets — must never be re-processed as input. */
 const ownSheets = new WeakSet<CSSStyleSheet>();
 
 async function fetchCrossOriginCss(url: string): Promise<string | null> {
   const cached = sheetCache.get(url);
   if (cached != null) return cached;
-
   try {
     const response = (await browser.runtime.sendMessage({
       type: 'FETCH_STYLESHEET',
       url,
     })) as FetchStylesheetResponse;
-
-    if (!response?.ok) return null;
-    if (response.cssText.length > MAX_SHEET_BYTES) return null;
+    if (!response?.ok || response.cssText.length > MAX_SHEET_BYTES) return null;
     sheetCache.set(url, response.cssText);
     if (sheetCache.size > 32) {
       const first = sheetCache.keys().next().value;
@@ -56,461 +42,360 @@ async function fetchCrossOriginCss(url: string): Promise<string | null> {
   }
 }
 
-function getOrCreateStyleEl(doc: Document): HTMLStyleElement {
-  let el = doc.getElementById(EXTENSION_STYLE_ID) as HTMLStyleElement | null;
-  if (!el) {
-    el = doc.createElement('style');
-    el.id = EXTENSION_STYLE_ID;
-    el.setAttribute('data-force-dark', 'overrides');
-    (doc.head ?? doc.documentElement).appendChild(el);
-  }
-  return el;
-}
-
-function processStyleRule(
-  rule: CSSStyleRule,
-  variableRoles: Map<string, Set<ColorRole>>,
-  overrides: CssOverride[],
-  seen?: Set<string>,
-): void {
-  const selector = rule.selectorText;
-  if (!selector) return;
-
-  const push = (override: CssOverride): void => {
-    const key = `${override.selector}|${override.property}|${override.value}|${override.important}`;
-    if (seen && seen.has(key)) return;
-    seen?.add(key);
-    overrides.push(override);
-  };
-
-  const bgRaw =
-    rule.style.getPropertyValue('background-color') ||
-    rule.style.getPropertyValue('background');
-  let rewrittenBg: string | undefined;
-
-  for (let i = 0; i < rule.style.length; i += 1) {
-    const property = rule.style.item(i);
-    const value = rule.style.getPropertyValue(property).trim();
-    const important = rule.style.getPropertyPriority(property) === 'important';
-
-    if (!shouldProcessProperty(property)) continue;
-
-    if (property.startsWith('--')) {
-      const roles = variableRoles.get(property);
-      if (roles && roles.size === 1) {
-        const role = [...roles][0];
-        const rewritten = rewriteColorsInValue(value, role);
-        if (rewritten) {
-          push({
-            selector: ':root, :host',
-            property,
-            value: rewritten,
-            important,
-          });
-        }
-      }
-      continue;
-    }
-
-    if (
-      (property === 'background-image' || property === 'background') &&
-      /^url\(/i.test(value) &&
-      !/gradient/i.test(value)
-    ) {
-      continue;
-    }
-
-    if (value.includes('var(')) continue;
-
-    const role = roleForProperty(property);
-    if (!role) continue;
-
-    let rewritten = rewriteColorsInValue(value, role);
-    if (!rewritten) continue;
-
-    if (role === 'background') {
-      rewrittenBg = rewritten;
-    }
-
-    if (role === 'foreground' && property === 'color') {
-      const siblingSource = rewrittenBg
-        ?? (bgRaw ? rewriteColorsInValue(bgRaw, 'background') : null);
-      if (siblingSource) {
-        const fg = parseColor(rewritten);
-        const bg = parseColor(siblingSource);
-        if (fg && bg) {
-          const ensured = ensureContrast(fg, bg);
-          rewritten = `rgba(${ensured.r}, ${ensured.g}, ${ensured.b}, ${ensured.a})`;
-        }
-      }
-    }
-
-    push({
-      selector,
-      property,
-      value: rewritten,
-      important,
-    });
-  }
-}
-
-async function gatherSheets(doc: Document): Promise<CSSStyleSheet[]> {
+async function gatherSheets(scope: Scope): Promise<CSSStyleSheet[]> {
   const sheets: CSSStyleSheet[] = [];
-
-  for (const sheet of Array.from(doc.styleSheets)) {
+  for (const sheet of Array.from(scope.styleSheets)) {
     try {
-      // Accessing cssRules throws for cross-origin sheets.
-      void sheet.cssRules;
+      void sheet.cssRules; // throws for cross-origin sheets
       sheets.push(sheet);
     } catch {
-      const href = sheet.href;
-      if (!href) continue;
-      const cssText = await fetchCrossOriginCss(href);
+      if (!sheet.href) continue;
+      const cssText = await fetchCrossOriginCss(sheet.href);
       if (!cssText) continue;
       try {
         const constructed = new CSSStyleSheet();
         await constructed.replace(cssText);
         sheets.push(constructed);
       } catch {
-        // Ignore unparsable sheets.
+        // Unparsable sheet.
       }
     }
   }
-
-  if (doc.adoptedStyleSheets?.length) {
-    for (const sheet of doc.adoptedStyleSheets) {
-      if (ownSheets.has(sheet)) continue;
-      sheets.push(sheet);
-    }
+  for (const sheet of scope.adoptedStyleSheets ?? []) {
+    if (!ownSheets.has(sheet)) sheets.push(sheet);
   }
-
   return sheets;
 }
 
-function rewriteInlineStyles(
-  root: ParentNode,
-  backups: InlineBackup[],
-): number {
-  let count = 0;
-  const elements = root.querySelectorAll<HTMLElement>('[style]');
-  for (const el of elements) {
+function safeRules(sheet: CSSStyleSheet): CSSRuleList | null {
+  try {
+    return sheet.cssRules;
+  } catch {
+    return null;
+  }
+}
+
+interface InlineBackup {
+  value: string;
+  priority: string;
+}
+
+export function createCssRecolorStrategy(): PageThemeStrategy {
+  let observer: MutationObserver | null = null;
+  let loadTarget: Document | null = null;
+  let loadListener: ((event: Event) => void) | null = null;
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  let pollTimer: ReturnType<typeof setInterval> | null = null;
+  let stopped = true;
+  let refreshing = false;
+  let refreshAgain = false;
+  let lastSignature = '';
+
+  const overrideSheets = new Map<Scope, CSSStyleSheet>();
+  const shadowRoots = new Set<ShadowRoot>();
+  /** element -> property -> original inline value (so revert restores it). */
+  const inlineBackups = new Map<HTMLElement, Map<string, InlineBackup>>();
+  /** What we last wrote inline, so our own mutations don't loop. */
+  const written = new WeakMap<HTMLElement, Map<string, string>>();
+
+  /** An adopted sheet placed last outranks every document sheet. */
+  const ensureAdopted = (scope: Scope, sheet: CSSStyleSheet): void => {
+    const adopted = scope.adoptedStyleSheets ?? [];
+    if (adopted[adopted.length - 1] === sheet) return;
+    scope.adoptedStyleSheets = [...adopted.filter((s) => s !== sheet), sheet];
+  };
+
+  const publish = (doc: Document, scope: Scope, css: string): void => {
+    try {
+      let sheet = overrideSheets.get(scope);
+      if (!sheet) {
+        sheet = new CSSStyleSheet();
+        overrideSheets.set(scope, sheet);
+        ownSheets.add(sheet);
+      }
+      sheet.replaceSync(css);
+      ensureAdopted(scope, sheet);
+      doc.getElementById(EXTENSION_STYLE_ID)?.remove();
+      return;
+    } catch {
+      // Constructable sheets unavailable; fall back to a <style>.
+    }
+    if (scope !== doc) return;
+    let el = doc.getElementById(EXTENSION_STYLE_ID) as HTMLStyleElement | null;
+    if (!el) {
+      el = doc.createElement('style');
+      el.id = EXTENSION_STYLE_ID;
+      (doc.head ?? doc.documentElement).appendChild(el);
+    }
+    el.textContent = css;
+  };
+
+  const signatureOf = (scopes: Scope[]): string => {
+    const parts: string[] = [];
+    for (const scope of scopes) {
+      const own = overrideSheets.get(scope);
+      const describe = (sheet: CSSStyleSheet): void => {
+        const rules = safeRules(sheet);
+        parts.push(`${sheet.href ?? 'inline'}:${rules ? rules.length : -1}`);
+      };
+      for (const sheet of Array.from(scope.styleSheets)) describe(sheet);
+      for (const sheet of scope.adoptedStyleSheets ?? []) {
+        if (sheet !== own) describe(sheet);
+      }
+    }
+    return parts.join('|');
+  };
+
+  const rewriteInlineElement = (el: HTMLElement): void => {
     const style = el.style;
     for (let i = 0; i < style.length; i += 1) {
       const property = style.item(i);
       if (!shouldProcessProperty(property) || property.startsWith('--')) {
         continue;
       }
-      const value = style.getPropertyValue(property);
-      if (!value || value.includes('var(')) continue;
       const role = roleForProperty(property);
       if (!role) continue;
-      const rewritten = rewriteColorsInValue(value, role);
+      const value = style.getPropertyValue(property);
+      if (!value) continue;
+      if (written.get(el)?.get(property) === value) continue;
+      const rewritten = rewriteValueForRole(value, role);
       if (!rewritten || rewritten === value) continue;
 
-      backups.push({
-        element: el,
-        property,
-        value,
-        priority: style.getPropertyPriority(property),
-      });
-      style.setProperty(
-        property,
-        rewritten,
-        style.getPropertyPriority(property),
-      );
-      count += 1;
-    }
-  }
-  return count;
-}
-
-function observeOpenShadows(
-  doc: Document,
-  onShadow: (root: ShadowRoot) => void,
-): MutationObserver {
-  const seen = new WeakSet<ShadowRoot>();
-
-  const scan = (node: Node) => {
-    if (!(node instanceof Element)) return;
-    const shadow = (node as Element & { shadowRoot?: ShadowRoot | null })
-      .shadowRoot;
-    if (shadow && !seen.has(shadow)) {
-      seen.add(shadow);
-      onShadow(shadow);
-    }
-    for (const child of Array.from(node.children)) {
-      scan(child);
+      const priority = style.getPropertyPriority(property);
+      let backups = inlineBackups.get(el);
+      if (!backups) {
+        backups = new Map();
+        inlineBackups.set(el, backups);
+      }
+      backups.set(property, { value, priority });
+      style.setProperty(property, rewritten, priority);
+      let mine = written.get(el);
+      if (!mine) {
+        mine = new Map();
+        written.set(el, mine);
+      }
+      mine.set(property, style.getPropertyValue(property));
     }
   };
 
-  scan(doc.documentElement);
-
-  const observer = new MutationObserver((mutations) => {
-    for (const mutation of mutations) {
-      for (const node of Array.from(mutation.addedNodes)) {
-        scan(node);
-      }
+  const rewriteInlineStyles = (root: ParentNode): void => {
+    for (const el of root.querySelectorAll<HTMLElement>('[style]')) {
+      rewriteInlineElement(el);
     }
-  });
-  observer.observe(doc.documentElement, { childList: true, subtree: true });
-  return observer;
-}
-
-export function createCssRecolorStrategy(): PageThemeStrategy & {
-  getOverrideCount: () => number;
-} {
-  let overrideCount = 0;
-  let mutationObserver: MutationObserver | null = null;
-  let shadowObserver: MutationObserver | null = null;
-  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-  let rescanTimer: ReturnType<typeof setInterval> | null = null;
-  let lastSheetSignature = '';
-  let loadListenerTarget: Document | null = null;
-  let loadListener: ((event: Event) => void) | null = null;
-  let stopped = false;
-  let adoptedOverrideSheet: CSSStyleSheet | null = null;
-  const inlineBackups: InlineBackup[] = [];
-
-  /**
-   * Publish overrides where they always win the cascade: a constructable
-   * stylesheet adopted LAST. Document-level <style> overrides lose to sheets
-   * appended later and to adoptedStyleSheets (which hydration uses), while an
-   * adopted sheet outranks all document sheets and inline styles.
-   */
-  const publishOverrides = (doc: Document, css: string): void => {
-    const win = doc.defaultView;
-    if (win && typeof win.CSSStyleSheet !== 'undefined') {
-      try {
-        const sheet = adoptedOverrideSheet ?? new win.CSSStyleSheet();
-        adoptedOverrideSheet = sheet;
-        sheet.replaceSync(css);
-        ownSheets.add(sheet);
-        const adopted = Array.from(doc.adoptedStyleSheets ?? []).filter(
-          (s) => s !== sheet,
-        );
-        adopted.push(sheet);
-        doc.adoptedStyleSheets = adopted;
-        const fallback = doc.getElementById(EXTENSION_STYLE_ID);
-        if (fallback) fallback.remove();
-        return;
-      } catch {
-        // Constructable sheets unavailable or rejected; fall back below.
-      }
-    }
-    const styleEl = getOrCreateStyleEl(doc);
-    styleEl.textContent = css;
   };
 
-  const removeOverrideSheet = (doc: Document): void => {
-    if (adoptedOverrideSheet) {
-      try {
-        const adopted = Array.from(doc.adoptedStyleSheets ?? []).filter(
-          (s) => s !== adoptedOverrideSheet,
-        );
-        doc.adoptedStyleSheets = adopted;
-      } catch {
-        // ignore
+  const findShadowRoots = (doc: Document): ShadowRoot[] => {
+    const found: ShadowRoot[] = [];
+    const scan = (root: ParentNode): void => {
+      for (const el of Array.from(root.querySelectorAll('*'))) {
+        if (el.shadowRoot) {
+          found.push(el.shadowRoot);
+          scan(el.shadowRoot);
+        }
       }
-      adoptedOverrideSheet = null;
-    }
-    doc.getElementById(EXTENSION_STYLE_ID)?.remove();
-  };
-
-  /** Cheap fingerprint of every reachable sheet, including hydration-added
-   * adopted sheets and CSSOM rule counts that mutations cannot report. */
-  const computeSheetSignature = (doc: Document): string => {
-    const parts: string[] = [];
-    const describe = (sheet: CSSStyleSheet): void => {
-      let count: number;
-      try {
-        count = sheet.cssRules.length;
-      } catch {
-        count = -1;
-      }
-      parts.push(`${sheet.href ?? 'inline'}:${count}`);
     };
-    for (const sheet of Array.from(doc.styleSheets)) describe(sheet);
-    for (const sheet of Array.from(doc.adoptedStyleSheets ?? [])) {
-      if (sheet === adoptedOverrideSheet) continue;
-      describe(sheet);
-    }
-    return parts.join('|');
+    scan(doc);
+    return found;
   };
 
-  const applyToDocument = async (doc: Document): Promise<number> => {
-    const sheets = await gatherSheets(doc);
-    const allRules: CSSRule[] = [];
+  const applyScope = async (doc: Document, scope: Scope): Promise<void> => {
+    const sheets = await gatherSheets(scope);
+    const styleRules: Array<{ rule: CSSStyleRule; context: string[] }> = [];
+    const decls: Array<{ property: string; value: string }> = [];
     for (const sheet of sheets) {
-      try {
-        allRules.push(...Array.from(sheet.cssRules));
-      } catch {
-        // ignore
+      const rules = safeRules(sheet);
+      if (!rules) continue;
+      walkStyleRules(rules, (rule, context) => {
+        styleRules.push({ rule, context });
+        for (const d of declarationsOf(rule.style)) decls.push(d);
+      });
+    }
+    const variableRoles = computeVariableRoles(decls);
+
+    const overrides: CssOverride[] = [];
+    const seen = new Set<string>();
+    for (const { rule, context } of styleRules) {
+      const selector = rule.selectorText;
+      if (!selector) continue;
+      for (const d of rewriteDeclarations(
+        declarationsOf(rule.style),
+        variableRoles,
+      )) {
+        const key = `${context.join('|')}|${selector}|${d.property}|${d.value}|${d.important}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        overrides.push({ ...d, selector, context });
       }
     }
 
-    const usages = collectVariableUsages(allRules);
-    const variableRoles = new Map<string, Set<ColorRole>>();
-    for (const [name, usage] of usages) {
-      variableRoles.set(name, usage.roles);
-    }
-
-    const seen = new Set<string>();
-    const overrides: CssOverride[] = [];
-    for (const sheet of sheets) {
-      walkStyleRules(sheet, (rule) => {
-        processStyleRule(rule, variableRoles, overrides, seen);
-      });
-    }
-
-    publishOverrides(doc, buildOverrideSheet(overrides));
-
-    const inlineCount = rewriteInlineStyles(doc, inlineBackups);
-    return overrides.length + inlineCount;
+    const base = scope === doc ? `${BASE_LAYER_CSS}\n` : '';
+    publish(doc, scope, base + buildOverrideSheet(overrides));
   };
 
-  const strategy: PageThemeStrategy & { getOverrideCount: () => number } = {
+  const refresh = async (doc: Document): Promise<void> => {
+    if (stopped) return;
+    if (refreshing) {
+      refreshAgain = true;
+      return;
+    }
+    refreshing = true;
+    try {
+      do {
+        refreshAgain = false;
+        await applyScope(doc, doc);
+        for (const shadow of findShadowRoots(doc)) {
+          if (stopped) return;
+          shadowRoots.add(shadow);
+          await applyScope(doc, shadow);
+          rewriteInlineStyles(shadow);
+        }
+        if (stopped) return;
+        rewriteInlineStyles(doc);
+        lastSignature = signatureOf([doc, ...shadowRoots]);
+      } while (refreshAgain && !stopped);
+    } catch (error) {
+      console.warn('[ForceDark] recolor refresh failed', error);
+    } finally {
+      refreshing = false;
+    }
+  };
+
+  return {
     id: 'recolor',
 
     async apply(page: PageContext): Promise<StrategyResult> {
-      const count = await applyToDocument(page.document);
-      overrideCount = count;
+      const doc = page.document;
       stopped = false;
+      doc.documentElement.setAttribute(ROOT_SCHEME_ATTR, 'recolor');
 
-      const scheduleRefresh = () => {
+      // Publish the base layer right away; sheets are folded in as they land.
+      publish(doc, doc, BASE_LAYER_CSS);
+
+      const schedule = (): void => {
+        if (stopped) return;
         if (debounceTimer) clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(async () => {
+        debounceTimer = setTimeout(() => {
           debounceTimer = null;
-          if (stopped) return;
-          overrideCount = await applyToDocument(page.document);
+          void refresh(doc);
         }, 80);
       };
 
-      // A stylesheet resource finishing its fetch produces no DOM mutation,
-      // so watch load events to recolor sheets as they arrive on the fly.
-      const handleLoadEvent = (event: Event) => {
-        const target = event.target as Element | null;
+      loadTarget = doc;
+      loadListener = (event: Event) => {
+        const target = event.target;
         if (
           target instanceof HTMLLinkElement ||
           target instanceof HTMLStyleElement
         ) {
-          scheduleRefresh();
+          schedule();
         }
       };
-      if (loadListenerTarget && loadListener) {
-        loadListenerTarget.removeEventListener('load', loadListener, true);
-      }
-      loadListener = handleLoadEvent;
-      loadListenerTarget = page.document;
-      page.document.addEventListener('load', handleLoadEvent, true);
+      doc.addEventListener('load', loadListener, true);
 
-      mutationObserver?.disconnect();
-      mutationObserver = new MutationObserver((mutations) => {
+      observer = new MutationObserver((mutations) => {
         for (const mutation of mutations) {
-          if (
-            mutation.type === 'childList' ||
-            mutation.type === 'attributes'
-          ) {
-            const target = mutation.target;
+          const target = mutation.target;
+          if (mutation.type === 'attributes') {
             if (
-              target instanceof HTMLStyleElement ||
-              target instanceof HTMLLinkElement ||
-              (target instanceof HTMLElement &&
-                mutation.attributeName === 'style')
+              mutation.attributeName === 'style' &&
+              target instanceof HTMLElement
             ) {
-              scheduleRefresh();
-              return;
+              rewriteInlineElement(target);
+            } else if (
+              target instanceof HTMLLinkElement ||
+              target instanceof HTMLStyleElement
+            ) {
+              schedule();
             }
-            for (const node of Array.from(mutation.addedNodes)) {
-              if (
-                node instanceof HTMLStyleElement ||
-                node instanceof HTMLLinkElement
-              ) {
-                scheduleRefresh();
-                return;
+            continue;
+          }
+          if (target instanceof HTMLStyleElement) schedule();
+          for (const node of Array.from(mutation.addedNodes)) {
+            if (!(node instanceof Element)) continue;
+            if (node.id === EXTENSION_STYLE_ID) continue;
+            if (
+              node instanceof HTMLStyleElement ||
+              node instanceof HTMLLinkElement
+            ) {
+              schedule();
+            } else if (node instanceof HTMLElement) {
+              if (node.hasAttribute('style')) rewriteInlineElement(node);
+              if (node.firstElementChild) rewriteInlineStyles(node);
+              if (node.shadowRoot || node.querySelector('style, link')) {
+                schedule();
               }
             }
           }
         }
       });
-      mutationObserver.observe(page.document.documentElement, {
+      observer.observe(doc.documentElement, {
         childList: true,
         subtree: true,
         attributes: true,
-        attributeFilter: ['style', 'href'],
+        attributeFilter: ['style', 'href', 'media', 'disabled'],
       });
 
-      shadowObserver?.disconnect();
-      shadowObserver = observeOpenShadows(page.document, (shadow) => {
-        rewriteInlineStyles(shadow, inlineBackups);
-      });
-
-      // Hydration swaps CSSOM rules and adoptedStyleSheets without DOM
-      // mutations; poll a cheap sheet signature to keep up with those.
-      lastSheetSignature = computeSheetSignature(page.document);
-      if (rescanTimer) clearInterval(rescanTimer);
-      rescanTimer = setInterval(() => {
-        if (stopped) return;
-        if (page.document.visibilityState === 'hidden') return;
-        const signature = computeSheetSignature(page.document);
-        if (signature !== lastSheetSignature) {
-          lastSheetSignature = signature;
-          scheduleRefresh();
+      // Hydration swaps CSSOM rules / adopted sheets without DOM mutations,
+      // and pages sometimes overwrite adoptedStyleSheets. Poll cheaply.
+      pollTimer = setInterval(() => {
+        if (stopped || doc.visibilityState === 'hidden') return;
+        const own = overrideSheets.get(doc);
+        if (own) ensureAdopted(doc, own);
+        const signature = signatureOf([doc, ...shadowRoots]);
+        if (signature !== lastSignature) {
+          lastSignature = signature;
+          schedule();
         }
       }, 750);
 
-      if (count > 0) {
-        page.document.documentElement.setAttribute(
-          ROOT_SCHEME_ATTR,
-          'recolor',
-        );
-        return 'handled';
-      }
-      return 'continue';
+      await refresh(doc);
+      return 'handled';
     },
 
     revert(page: PageContext): void {
       stopped = true;
-      mutationObserver?.disconnect();
-      mutationObserver = null;
-      shadowObserver?.disconnect();
-      shadowObserver = null;
-      if (debounceTimer) {
-        clearTimeout(debounceTimer);
-        debounceTimer = null;
+      observer?.disconnect();
+      observer = null;
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = null;
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = null;
+      if (loadTarget && loadListener) {
+        loadTarget.removeEventListener('load', loadListener, true);
       }
-      if (rescanTimer) {
-        clearInterval(rescanTimer);
-        rescanTimer = null;
-      }
-      if (loadListenerTarget && loadListener) {
-        loadListenerTarget.removeEventListener('load', loadListener, true);
-        loadListenerTarget = null;
-        loadListener = null;
-      }
+      loadTarget = null;
+      loadListener = null;
 
-      removeOverrideSheet(page.document);
-
-      for (const backup of inlineBackups) {
+      for (const [scope, sheet] of overrideSheets) {
         try {
-          backup.element.style.setProperty(
-            backup.property,
-            backup.value,
-            backup.priority,
+          scope.adoptedStyleSheets = (scope.adoptedStyleSheets ?? []).filter(
+            (s) => s !== sheet,
           );
         } catch {
-          // Element may be gone.
+          // ignore
         }
       }
-      inlineBackups.length = 0;
+      overrideSheets.clear();
+      shadowRoots.clear();
+      page.document.getElementById(EXTENSION_STYLE_ID)?.remove();
 
-      page.document.documentElement.removeAttribute(ROOT_SCHEME_ATTR);
-      overrideCount = 0;
+      for (const [el, backups] of inlineBackups) {
+        for (const [property, backup] of backups) {
+          try {
+            el.style.setProperty(property, backup.value, backup.priority);
+          } catch {
+            // Element may be gone.
+          }
+        }
+      }
+      inlineBackups.clear();
+
+      const root = page.document.documentElement;
+      if (root.getAttribute(ROOT_SCHEME_ATTR) === 'recolor') {
+        root.removeAttribute(ROOT_SCHEME_ATTR);
+      }
     },
-
-    getOverrideCount: () => overrideCount,
   };
-
-  return strategy;
 }
 
 export const cssRecolorStrategy = createCssRecolorStrategy();

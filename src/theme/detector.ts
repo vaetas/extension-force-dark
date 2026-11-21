@@ -51,9 +51,26 @@ function effectivePageBackgroundIsLight(doc: Document): boolean {
   return false;
 }
 
+/** Dark/light state of the page canvas, or null when it is transparent. */
+function canvasIsDark(doc: Document): boolean | null {
+  for (const node of [doc.documentElement, doc.body]) {
+    if (!node) continue;
+    const bg = parseColor(getComputedStyle(node).backgroundColor);
+    if (bg && bg.a > 0.9) return srgbLightness(bg) <= 0.45;
+  }
+  // Nothing painted by the author: the browser canvas follows color-scheme.
+  const scheme = doc.documentElement
+    ? getComputedStyle(doc.documentElement).colorScheme
+    : '';
+  return /\bdark\b/.test(scheme) && !/\blight\b/.test(scheme) ? true : null;
+}
+
+const NON_SURFACE = /^(INPUT|TEXTAREA|SELECT|BUTTON|IMG|VIDEO|CANVAS|SVG|PICTURE)$/;
+
 function samplePointIsDarkBackground(doc: Document, x: number, y: number): boolean | null {
   const el = doc.elementFromPoint(x, y) as HTMLElement | null;
-  if (!el) return null;
+  // Form controls and media get UA/own colors that say nothing about the page.
+  if (!el || NON_SURFACE.test(el.tagName.toUpperCase())) return null;
 
   const bg = parseColor(getComputedStyle(el).backgroundColor);
   if (bg && bg.a > 0.2) {
@@ -72,16 +89,18 @@ function samplePointIsDarkBackground(doc: Document, x: number, y: number): boole
   return null;
 }
 
-export function samplePageIsDark(doc: Document): boolean {
-  if (hasStrictDarkColorScheme(doc)) return true;
-  if (hasDarkMarkers(doc)) return true;
+export type PageTone = 'dark' | 'light' | 'unknown';
+
+export function classifyPage(doc: Document): PageTone {
+  if (hasStrictDarkColorScheme(doc)) return 'dark';
+  if (hasDarkMarkers(doc)) return 'dark';
 
   const win = doc.defaultView;
-  if (!win) return false;
+  if (!win) return 'unknown';
 
   // A light page canvas is decisive: sample points can hit dark headers or
   // images and must not make a light site look dark.
-  if (effectivePageBackgroundIsLight(doc)) return false;
+  if (effectivePageBackgroundIsLight(doc)) return 'light';
 
   const width = win.innerWidth || 800;
   const height = win.innerHeight || 600;
@@ -93,18 +112,23 @@ export function samplePageIsDark(doc: Document): boolean {
     [16, 16],
   ] as const;
 
+  const canvas = canvasIsDark(doc);
   let darkVotes = 0;
   let samples = 0;
-
   for (const [x, y] of points) {
-    const vote = samplePointIsDarkBackground(doc, x, y);
+    // Points past the end of a short page hit <html>; the canvas decides there.
+    const vote = samplePointIsDarkBackground(doc, x, y) ?? canvas;
     if (vote == null) continue;
     samples += 1;
     if (vote) darkVotes += 1;
   }
 
-  if (samples === 0) return false;
-  return darkVotes / samples >= 0.5;
+  if (samples === 0) return 'unknown';
+  return darkVotes / samples >= 0.5 ? 'dark' : 'light';
+}
+
+export function samplePageIsDark(doc: Document): boolean {
+  return classifyPage(doc) === 'dark';
 }
 
 export function hasFrameworkRoot(doc: Document): boolean {

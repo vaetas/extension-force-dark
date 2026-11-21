@@ -1,16 +1,15 @@
 import type { PageThemeStatus } from '../storage/settings';
 
 export type Message =
-  | { type: 'GET_SETTINGS' }
   | { type: 'FETCH_STYLESHEET'; url: string }
+  | { type: 'ENSURE_SCHEME' }
   | {
       type: 'REPORT_THEME_STATUS';
       status: PageThemeStatus;
-      origin: string;
+      host: string;
       /** performance.timeOrigin for this document, so stale reports lose. */
       timeOrigin: number;
-    }
-  | { type: 'RELOAD_TAB' };
+    };
 
 export type FetchStylesheetResponse =
   | { ok: true; cssText: string }

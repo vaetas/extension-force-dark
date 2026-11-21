@@ -15,7 +15,7 @@
     "postinstall": "wxt prepare",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "wxt build && bun scripts/e2e-hydration.mjs",
+    "test:e2e": "wxt build && bun scripts/e2e-modes.mjs",
     "test:site": "wxt build && bun scripts/e2e-check.mjs"
   },
   "devDependencies": {

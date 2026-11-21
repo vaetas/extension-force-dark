@@ -1,6 +1,6 @@
 export type StrategyResult = 'handled' | 'continue';
 
-export type ThemeMode = 'native' | 'recolor' | 'filter' | 'none';
+export type ThemeMode = 'native' | 'recolor' | 'invert';
 
 export interface PageContext {
   origin: string;

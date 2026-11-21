@@ -5,7 +5,8 @@ import puppeteer from 'puppeteer-core';
 import { readdirSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-const URL = process.argv[2] ?? 'https://blog.mozilla.org/en/mozilla/internet-policy/apple-ios-browser-engine-rules/';
+const URL = process.argv[2] ?? 'https://en.wikipedia.org/wiki/Dark_mode';
+const MODE = process.argv[3] ?? 'auto'; // off | auto | recolor | invert
 const EXT = resolve('.output/chrome-mv3');
 
 const userDataDir = resolve('.test-profile');
@@ -37,7 +38,17 @@ try {
     for (const t of browser.targets()) console.log('target:', t.type(), t.url());
   }
 
+  const sw = await worker?.worker();
+  const host = new globalThis.URL(URL).hostname;
+  await sw?.evaluate(
+    (h, m) => chrome.storage.local.set({ forceDarkSettings: { defaultMode: 'off', sites: { [h]: m } } }),
+    host,
+    MODE,
+  );
+  await sleep(500);
+
   const page = await browser.newPage();
+  await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: 'light' }]);
   await page.setViewport({ width: 1280, height: 900 });
   page.on('console', (msg) => {
     const text = msg.text();
@@ -63,6 +74,7 @@ try {
   };
 
   const result = await evaluateOnMain(() => {
+    const status = null;
     const rootAttr = document.documentElement.getAttribute('data-force-dark');
     const overrideEl = document.getElementById('force-dark-overrides');
     const adopted = document.adoptedStyleSheets ?? [];
