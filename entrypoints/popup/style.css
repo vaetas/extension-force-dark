@@ -70,3 +70,7 @@ select {
 
 .hint { margin: 0; color: var(--muted); font-size: 12px; }
 kbd { background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; font: inherit; font-size: 11px; }
+
+.images { margin-top: 10px; }
+.images em { color: var(--muted); font-style: normal; font-size: 12px; }
+.defaults { display: grid; gap: 8px; }

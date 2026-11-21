@@ -1,5 +1,6 @@
 import { hostFromUrl, isRestrictedUrl } from '../src/guards/page-guard';
-import type { Message } from '../src/messaging/protocol';
+import type { Message, SampleImageResponse } from '../src/messaging/protocol';
+import { SAMPLE_SIZE } from '../src/theme/image-classify';
 import {
   clearTabThemeState,
   loadSettings,
@@ -132,6 +133,49 @@ async function fetchStylesheet(
   }
 }
 
+// ---- Image sampling for cross-origin images -------------------------------
+// The page can't read pixels of images it may not access; the background can
+// fetch them (host permissions) and only hands back a tiny downscaled sample.
+
+const MAX_IMAGE_BYTES = 3 * 1024 * 1024;
+const sampleCache = new Map<string, SampleImageResponse>();
+
+async function sampleImage(url: string): Promise<SampleImageResponse> {
+  if (!/^https?:/i.test(url)) return { ok: false, error: 'unsupported url' };
+  const cached = sampleCache.get(url);
+  if (cached) return cached;
+
+  let result: SampleImageResponse;
+  try {
+    const response = await fetch(url, { credentials: 'omit' });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const blob = await response.blob();
+    if (blob.size > MAX_IMAGE_BYTES) throw new Error('too large');
+    const bitmap = await createImageBitmap(blob);
+    const canvas = new OffscreenCanvas(SAMPLE_SIZE, SAMPLE_SIZE);
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) throw new Error('no 2d context');
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(bitmap, 0, 0, SAMPLE_SIZE, SAMPLE_SIZE);
+    bitmap.close();
+    result = {
+      ok: true,
+      pixels: Array.from(ctx.getImageData(0, 0, SAMPLE_SIZE, SAMPLE_SIZE).data),
+    };
+  } catch (error) {
+    result = {
+      ok: false,
+      error: error instanceof Error ? error.message : 'sample failed',
+    };
+  }
+  sampleCache.set(url, result);
+  if (sampleCache.size > 300) {
+    const first = sampleCache.keys().next().value;
+    if (first) sampleCache.delete(first);
+  }
+  return result;
+}
+
 // ---- Keyboard shortcut ----------------------------------------------------
 
 async function toggleActiveSite(): Promise<void> {
@@ -200,6 +244,9 @@ export default defineBackground(() => {
       switch (typed.type) {
         case 'FETCH_STYLESHEET':
           return fetchStylesheet(typed.url);
+
+        case 'SAMPLE_IMAGE':
+          return sampleImage(typed.url);
 
         case 'ENSURE_SCHEME': {
           const tabId = sender.tab?.id;

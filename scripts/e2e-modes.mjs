@@ -13,8 +13,14 @@ const MIME = { '.html': 'text/html', '.css': 'text/css' };
 const CHROME =
   process.env.CHROME_PATH ?? '/Applications/Chromium.app/Contents/MacOS/Chromium';
 
+let imagesHtml = '';
+const crossOriginPngs = new Map();
 const server = createServer(async (req, res) => {
   try {
+    if (req.url === '/images.html') {
+      res.writeHead(200, { 'content-type': 'text/html' });
+      return res.end(imagesHtml);
+    }
     const file = join(ROOT, '.' + req.url.split('?')[0]);
     const data = await readFile(file);
     res.writeHead(200, { 'content-type': MIME[extname(file)] ?? 'text/plain' });
@@ -178,6 +184,73 @@ try {
     mkdirSync('.test-shots', { recursive: true });
     await page.screenshot({ path: '.test-shots/hydration.png' });
     await page.close();
+  }
+
+  // 6. Opt-in image darkening.
+  {
+    // Draw test artwork in the browser and keep the PNG bytes.
+    const art = await browser.newPage();
+    const urls = await art.evaluate(() => {
+      const make = (w, h, paint) => {
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        paint(c.getContext('2d'), w, h);
+        return c.toDataURL('image/png');
+      };
+      return {
+        logo: make(120, 40, (x, w, h) => { x.fillStyle = '#fff'; x.fillRect(0, 0, w, h); x.fillStyle = '#111'; x.fillRect(20, 14, 80, 12); }),
+        photo: make(120, 80, (x, w, h) => { for (let i = 0; i < w; i++) for (let j = 0; j < h; j++) { x.fillStyle = `rgb(${(i * 7 + j * 3) % 256},${(i * 5 + j * 11) % 256},${(i * 13 + j * 2) % 256})`; x.fillRect(i, j, 1, 1); } }),
+        cutout: make(60, 60, (x) => { x.fillStyle = '#111'; x.fillRect(15, 15, 30, 30); }),
+      };
+    });
+    await art.close();
+    crossOriginPngs.set('/logo.png', Buffer.from(urls.logo.split(',')[1], 'base64'));
+    const other = createServer((req, res) => {
+      const png = crossOriginPngs.get(req.url);
+      if (!png) return res.writeHead(404).end();
+      res.writeHead(200, { 'content-type': 'image/png' }); // deliberately no CORS headers
+      res.end(png);
+    });
+    await new Promise((r) => other.listen(0, '127.0.0.1', r));
+    const otherBase = `http://127.0.0.1:${other.address().port}`;
+    imagesHtml = `<!doctype html><html><body style="background:#fff">
+      <img id="logo" src="${urls.logo}"><img id="photo" src="${urls.photo}">
+      <img id="cutout" src="${urls.cutout}"><img id="remote" src="${otherBase}/logo.png"></body></html>`;
+
+    const attrs = (page) => page.evaluate(() => Object.fromEntries(
+      ['logo', 'photo', 'cutout', 'remote'].map((id) => [id, document.getElementById(id).getAttribute('data-force-dark-img')])));
+    const recolor = { defaultMode: 'off', sites: { [HOST]: 'recolor' } };
+
+    const page = await open('/images.html', { ...recolor, darkenImages: false, imageSites: {} });
+    await sleep(1000);
+    let a = await attrs(page);
+    check('images: nothing touched without opt-in', Object.values(a).every((v) => v === null), JSON.stringify(a));
+
+    await setSettings({ ...recolor, darkenImages: false, imageSites: { [HOST]: true } });
+    await sleep(2500);
+    a = await attrs(page);
+    check('images: light logo -> bg', a.logo === 'bg', JSON.stringify(a));
+    check('images: transparent dark cutout -> ink', a.cutout === 'ink', JSON.stringify(a));
+    check('images: photo untouched', a.photo === null, JSON.stringify(a));
+    check('images: cross-origin logo handled via background', a.remote === 'bg', JSON.stringify(a));
+    const f = await page.evaluate(() => getComputedStyle(document.getElementById('logo')).filter);
+    check('images: filter applied to logo', /invert/.test(f), f);
+
+    await setSettings({ ...recolor, darkenImages: true, imageSites: { [HOST]: false } });
+    await sleep(800);
+    a = await attrs(page);
+    check('images: per-site off removes everything', Object.values(a).every((v) => v === null), JSON.stringify(a));
+
+    await setSettings({ ...recolor, darkenImages: true, imageSites: {} });
+    await sleep(2000);
+    a = await attrs(page);
+    check('images: default on works', a.logo === 'bg', JSON.stringify(a));
+    await setSettings({ defaultMode: 'off', sites: {}, darkenImages: true, imageSites: {} });
+    await sleep(800);
+    a = await attrs(page);
+    check('images: mode off removes them', Object.values(a).every((v) => v === null), JSON.stringify(a));
+    await page.close();
+    other.close();
   }
 } catch (error) {
   console.error(error);

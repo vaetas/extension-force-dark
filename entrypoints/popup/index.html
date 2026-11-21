@@ -21,7 +21,11 @@
           <button type="button" data-mode="invert" role="radio" title="Invert everything — works on anything">Invert</button>
         </div>
         <p id="status" class="status">Checking…</p>
-        <button id="reset" type="button" class="link" hidden>Use default for this site</button>
+        <label class="row images" title="Inverts logos, diagrams and icons that have a light background. Works with Recolor, and with Auto when it recolors. If an image looks wrong, switch this off.">
+          <span>Darken light images <em>(experimental)</em></span>
+          <input id="images-site" type="checkbox" />
+        </label>
+        <button id="reset" type="button" class="link" hidden>Use defaults for this site</button>
       </section>
 
       <section class="defaults">
@@ -33,6 +37,10 @@
             <option value="recolor">Recolor</option>
             <option value="invert">Invert</option>
           </select>
+        </label>
+        <label class="row">
+          <span>Darken light images by default</span>
+          <input id="images-default" type="checkbox" />
         </label>
       </section>
 

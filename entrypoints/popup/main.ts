@@ -1,11 +1,14 @@
 import { hostFromUrl, isRestrictedUrl } from '../../src/guards/page-guard';
 import {
+  darkenImagesFor,
   getTabThemeState,
   isSiteMode,
   loadSettings,
   modeFor,
   saveSettings,
+  setDarkenImagesDefault,
   setDefaultMode,
+  setSiteDarkenImages,
   setSiteMode,
   SETTINGS_STORAGE_KEY,
   type SiteMode,
@@ -20,12 +23,19 @@ const defaultSelect = document.getElementById('default-mode') as HTMLSelectEleme
 const sitesDetails = document.getElementById('sites-details') as HTMLDetailsElement;
 const sitesCount = document.getElementById('sites-count') as HTMLElement;
 const sitesList = document.getElementById('sites-list') as HTMLUListElement;
+const imagesSite = document.getElementById('images-site') as HTMLInputElement;
+const imagesDefault = document.getElementById('images-default') as HTMLInputElement;
 const modeButtons = Array.from(
   modesEl.querySelectorAll<HTMLButtonElement>('button[data-mode]'),
 );
 
+type Settings = Awaited<ReturnType<typeof loadSettings>>;
 let currentHost: string | null = null;
 let writeChain: Promise<void> = Promise.resolve();
+
+function resetSite(s: Settings, host: string): Settings {
+  return setSiteDarkenImages(setSiteMode(s, host, null), host, null);
+}
 
 function mutateSettings(
   change: (s: Awaited<ReturnType<typeof loadSettings>>) => Awaited<ReturnType<typeof loadSettings>>,
@@ -45,12 +55,15 @@ async function render(): Promise<void> {
   const tab = await getActiveTab();
 
   defaultSelect.value = settings.defaultMode;
+  imagesDefault.checked = settings.darkenImages;
 
   const url = tab?.url;
   const host = url && !isRestrictedUrl(url) ? hostFromUrl(url) : null;
   currentHost = host;
 
   for (const button of modeButtons) button.disabled = !host;
+  imagesSite.disabled = !host;
+  imagesSite.checked = host ? darkenImagesFor(settings, host) : false;
   resetEl.hidden = true;
 
   if (!host || tab?.id == null) {
@@ -63,14 +76,20 @@ async function render(): Promise<void> {
     for (const button of modeButtons) {
       button.setAttribute('aria-checked', String(button.dataset.mode === mode));
     }
-    resetEl.hidden = !(host in settings.sites);
+    resetEl.hidden = !(host in settings.sites || host in settings.imageSites);
 
     const state = await getTabThemeState(tab.id);
     const status = state && state.host === host ? state.status : null;
     statusEl.textContent = statusLabel(status, mode);
   }
 
-  const entries = Object.entries(settings.sites).sort(([a], [b]) => a.localeCompare(b));
+  const hosts = [...new Set([...Object.keys(settings.sites), ...Object.keys(settings.imageSites)])].sort();
+  const entries = hosts.map((h) => {
+    const parts: string[] = [];
+    if (h in settings.sites) parts.push(settings.sites[h]);
+    if (h in settings.imageSites) parts.push(settings.imageSites[h] ? 'images on' : 'images off');
+    return [h, parts.join(' · ')] as const;
+  });
   sitesDetails.hidden = entries.length === 0;
   sitesCount.textContent = String(entries.length);
   sitesList.replaceChildren(
@@ -87,7 +106,7 @@ async function render(): Promise<void> {
       remove.title = 'Use default for this site';
       remove.textContent = '✕';
       remove.addEventListener('click', () =>
-        mutateSettings((s) => setSiteMode(s, siteHost, null)),
+        mutateSettings((s) => resetSite(s, siteHost)),
       );
       li.append(name, mode, remove);
       return li;
@@ -109,7 +128,19 @@ modesEl.addEventListener('click', (event) => {
 resetEl.addEventListener('click', () => {
   if (!currentHost) return;
   const host = currentHost;
-  mutateSettings((s) => setSiteMode(s, host, null));
+  mutateSettings((s) => resetSite(s, host));
+});
+
+imagesSite.addEventListener('change', () => {
+  if (!currentHost) return;
+  const host = currentHost;
+  const on = imagesSite.checked;
+  mutateSettings((s) => setSiteDarkenImages(s, host, on));
+});
+
+imagesDefault.addEventListener('change', () => {
+  const on = imagesDefault.checked;
+  mutateSettings((s) => setDarkenImagesDefault(s, on));
 });
 
 defaultSelect.addEventListener('change', () => {

@@ -1,5 +1,6 @@
 import { shouldSkipFrame } from '../src/guards/page-guard';
 import {
+  darkenImagesFor,
   isSiteMode,
   loadSettings,
   modeFor,
@@ -7,6 +8,7 @@ import {
   SETTINGS_STORAGE_KEY,
   type PageThemeStatus,
 } from '../src/storage/settings';
+import { createImageDarkener } from '../src/theme/image-darken';
 import { createController } from '../src/theme/pipeline';
 import type { PageContext } from '../src/theme/types';
 
@@ -54,6 +56,18 @@ export default defineContentScript({
       document,
     };
 
+    // Opt-in image inversion; only meaningful while the page is recolored.
+    const images = createImageDarkener();
+    let imagesWanted = false;
+    let lastStatus: PageThemeStatus = 'pending';
+    const syncImages = (): void => {
+      if (imagesWanted && lastStatus === 'recolor' && document.documentElement) {
+        images.start(document);
+      } else {
+        images.stop();
+      }
+    };
+
     const report = (status: PageThemeStatus): void => {
       if (!isTopFrame || ctx.isInvalid) return;
       void browser.runtime
@@ -68,12 +82,18 @@ export default defineContentScript({
         });
     };
 
-    const controller = createController(page, report);
+    const controller = createController(page, (status) => {
+      lastStatus = status;
+      syncImages();
+      report(status);
+    });
 
     whenRootExists(document, () => {
       void loadSettings()
         .then((settings) => {
-          if (!ctx.isInvalid) return controller.set(modeFor(settings, host));
+          if (ctx.isInvalid) return;
+          imagesWanted = darkenImagesFor(settings, host);
+          return controller.set(modeFor(settings, host));
         })
         .catch((error) => console.warn('[ForceDark] load failed', error));
     });
@@ -85,7 +105,10 @@ export default defineContentScript({
       if (area !== 'local' || ctx.isInvalid) return;
       const change = changes[SETTINGS_STORAGE_KEY];
       if (!change) return;
-      const mode = modeFor(normalizeSettings(change.newValue), host);
+      const settings = normalizeSettings(change.newValue);
+      const mode = modeFor(settings, host);
+      imagesWanted = darkenImagesFor(settings, host);
+      syncImages();
       if (isSiteMode(mode) && document.documentElement) {
         void controller.set(mode);
       }
@@ -96,8 +119,8 @@ export default defineContentScript({
     ctx.addEventListener(window, 'pageshow', (event) => {
       if (!(event as PageTransitionEvent).persisted) return;
       void loadSettings().then((settings) => {
-        const mode = modeFor(settings, host);
-        void controller.set(mode);
+        imagesWanted = darkenImagesFor(settings, host);
+        void controller.set(modeFor(settings, host));
       });
     });
   },

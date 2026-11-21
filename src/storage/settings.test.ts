@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_SETTINGS,
+  darkenImagesFor,
+  setDarkenImagesDefault,
+  setSiteDarkenImages,
   modeFor,
   normalizeSettings,
   setDefaultMode,
@@ -42,5 +45,27 @@ describe('normalizeSettings', () => {
     });
     expect(s.defaultMode).toBe('auto');
     expect(s.sites).toEqual({ 'a.com': 'auto', 'b.com': 'off' });
+  });
+});
+
+describe('darkenImagesFor', () => {
+  it('is off unless explicitly opted in', () => {
+    expect(darkenImagesFor(DEFAULT_SETTINGS, 'a.com')).toBe(false);
+  });
+
+  it('follows the default and lets a site override it either way', () => {
+    const on = setDarkenImagesDefault(DEFAULT_SETTINGS, true);
+    expect(darkenImagesFor(on, 'a.com')).toBe(true);
+    const mixed = setSiteDarkenImages(on, 'broken.com', false);
+    expect(darkenImagesFor(mixed, 'broken.com')).toBe(false);
+    expect(darkenImagesFor(mixed, 'a.com')).toBe(true);
+    const reset = setSiteDarkenImages(mixed, 'broken.com', null);
+    expect(darkenImagesFor(reset, 'broken.com')).toBe(true);
+  });
+
+  it('ignores malformed stored values', () => {
+    const s = normalizeSettings({ darkenImages: 'yes', imageSites: { 'a.com': 1, 'b.com': true } });
+    expect(s.darkenImages).toBe(false);
+    expect(s.imageSites).toEqual({ 'b.com': true });
   });
 });

@@ -12,11 +12,17 @@ export interface ForceDarkSettings {
   defaultMode: SiteMode;
   /** Per-hostname overrides. */
   sites: Record<string, SiteMode>;
+  /** Experimental: invert light-background images. Opt-in, off by default. */
+  darkenImages: boolean;
+  /** Per-hostname override of `darkenImages`. */
+  imageSites: Record<string, boolean>;
 }
 
 export const DEFAULT_SETTINGS: ForceDarkSettings = {
   defaultMode: 'off',
   sites: {},
+  darkenImages: false,
+  imageSites: {},
 };
 
 export type PageThemeStatus =
@@ -56,6 +62,33 @@ export function setSiteMode(
   return { ...settings, sites };
 }
 
+export function darkenImagesFor(
+  settings: ForceDarkSettings,
+  host: string,
+): boolean {
+  if (!host) return false;
+  return settings.imageSites[host] ?? settings.darkenImages;
+}
+
+/** `value === null` removes the override so the site follows the default. */
+export function setSiteDarkenImages(
+  settings: ForceDarkSettings,
+  host: string,
+  value: boolean | null,
+): ForceDarkSettings {
+  const imageSites = { ...settings.imageSites };
+  if (value === null) delete imageSites[host];
+  else imageSites[host] = value;
+  return { ...settings, imageSites };
+}
+
+export function setDarkenImagesDefault(
+  settings: ForceDarkSettings,
+  darkenImages: boolean,
+): ForceDarkSettings {
+  return { ...settings, darkenImages };
+}
+
 export function setDefaultMode(
   settings: ForceDarkSettings,
   defaultMode: SiteMode,
@@ -74,7 +107,7 @@ function hostFromOrigin(origin: string): string | null {
 /** Accepts the current shape and migrates the legacy origin-list shape. */
 export function normalizeSettings(stored: unknown): ForceDarkSettings {
   if (!stored || typeof stored !== 'object') {
-    return { defaultMode: DEFAULT_SETTINGS.defaultMode, sites: {} };
+    return { ...DEFAULT_SETTINGS, sites: {}, imageSites: {} };
   }
   const raw = stored as Record<string, unknown>;
   const sites: Record<string, SiteMode> = {};
@@ -82,6 +115,13 @@ export function normalizeSettings(stored: unknown): ForceDarkSettings {
   if (raw.sites && typeof raw.sites === 'object') {
     for (const [host, mode] of Object.entries(raw.sites)) {
       if (isSiteMode(mode)) sites[host] = mode;
+    }
+  }
+
+  const imageSites: Record<string, boolean> = {};
+  if (raw.imageSites && typeof raw.imageSites === 'object') {
+    for (const [host, value] of Object.entries(raw.imageSites)) {
+      if (typeof value === 'boolean') imageSites[host] = value;
     }
   }
 
@@ -106,6 +146,8 @@ export function normalizeSettings(stored: unknown): ForceDarkSettings {
         ? 'auto'
         : DEFAULT_SETTINGS.defaultMode,
     sites,
+    darkenImages: raw.darkenImages === true,
+    imageSites,
   };
 }
 
