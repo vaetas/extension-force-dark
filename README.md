@@ -37,4 +37,38 @@ bun run test:e2e   # builds, then drives Chromium through live mode switches
 bun run test:site <url> [mode]   # screenshot a real site (.test-shots/site.png)
 ```
 
-e2e scripts expect Chromium at `/Applications/Chromium.app` (override with `CHROME_PATH` for `test:e2e`).
+e2e scripts expect Chromium at `/Applications/Chromium.app` (override with `CHROME_PATH`). `HEADLESS=1` runs without a window (Chromium's new headless mode, which supports extensions).
+
+## Browser tests
+
+Everything below drives a real Chromium with the built extension loaded (`.output/chrome-mv3`).
+
+| Command | What it runs |
+| --- | --- |
+| `bun run test:e2e` | Quick smoke (`scripts/e2e-modes.mjs`): mode switching, hydration, image darkening. |
+| `bun run test:e2e:local` | The full offline matrix (`scripts/e2e/suites/*`), ~10 min. No network; fixtures are served locally (`*.localhost` gives us many origins). |
+| `bun scripts/e2e/run.mjs <suite[,suite]> --grep=text` | One suite / one scenario. |
+
+Local suites: `css-sources` (where colours can come from), `colors` (every colour syntax), `frameworks` (Tailwind, shadcn, Bootstrap, Primer, Material, kitchen-sink), `modes` (state machine, revert purity, races, per-host isolation, settings, script registration), `auto`, `matchmedia`, `frames`, `invert`, `images`, `lifecycle` (reload, bfcache, SPA, CSP, non-HTML documents), `perf`, `popup`.
+
+### Known gaps
+
+A scenario can assert `t.known(label, ok, reason)`: it is an *expected failure* for something the extension does not handle yet. The run stays green, prints the gap with its reason, and tells you when a gap starts passing (`XPASS`) so the marker can be removed. Plain `t.check` failures are real regressions. Only mark something known after confirming the cause — the reason string is documentation.
+
+### Writing a scenario
+
+```js
+// scripts/e2e/suites/my-suite.mjs
+import { mode } from '../harness.mjs';
+import { doc, expectDark } from './_util.mjs';
+
+export default function register({ scenario, server }) {
+  server.add('/x/page.html', doc('<div id="a">hi</div>', { style: '#a{background:#fff}' }));
+  scenario('white box gets dark', async (t) => {
+    const page = await t.open('/x/page.html', { settings: mode('recolor') });
+    await expectDark(t, page, '#a');
+  });
+}
+```
+
+`t.open` applies settings, loads the page, and waits for the extension's status. In-page helpers (`bgLuma`, `textScan` for contrast, `fingerprint`/`leftovers` for revert purity) live in `scripts/e2e/page-lib.mjs`; `t.shot` returns luminance stats and pixel samples of a screenshot. Every scenario also fails on extension console warnings or page errors unless it opts out with `allowIssues`.
