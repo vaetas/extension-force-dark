@@ -84,6 +84,7 @@ export function createCssRecolorStrategy(): PageThemeStrategy {
   let observer: MutationObserver | null = null;
   let loadTarget: Document | null = null;
   let loadListener: ((event: Event) => void) | null = null;
+  let visibilityListener: (() => void) | null = null;
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let stopped = true;
@@ -292,6 +293,14 @@ export function createCssRecolorStrategy(): PageThemeStrategy {
       };
       doc.addEventListener('load', loadListener, true);
 
+      visibilityListener = (): void => {
+        if (stopped || doc.visibilityState === 'hidden') return;
+        const own = overrideSheets.get(doc);
+        if (own) ensureAdopted(doc, own);
+        schedule();
+      };
+      doc.addEventListener('visibilitychange', visibilityListener);
+
       observer = new MutationObserver((mutations) => {
         for (const mutation of mutations) {
           const target = mutation.target;
@@ -343,7 +352,6 @@ export function createCssRecolorStrategy(): PageThemeStrategy {
         if (own) ensureAdopted(doc, own);
         const signature = signatureOf([doc, ...shadowRoots]);
         if (signature !== lastSignature) {
-          lastSignature = signature;
           schedule();
         }
       }, 750);
@@ -363,8 +371,12 @@ export function createCssRecolorStrategy(): PageThemeStrategy {
       if (loadTarget && loadListener) {
         loadTarget.removeEventListener('load', loadListener, true);
       }
+      if (loadTarget && visibilityListener) {
+        loadTarget.removeEventListener('visibilitychange', visibilityListener);
+      }
       loadTarget = null;
       loadListener = null;
+      visibilityListener = null;
 
       for (const [scope, sheet] of overrideSheets) {
         try {
