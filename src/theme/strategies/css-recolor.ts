@@ -30,6 +30,8 @@ interface InlineBackup {
 
 const MAX_SHEET_BYTES = 2 * 1024 * 1024;
 const sheetCache = new Map<string, string>();
+/** Our own published override sheets — must never be re-processed as input. */
+const ownSheets = new WeakSet<CSSStyleSheet>();
 
 async function fetchCrossOriginCss(url: string): Promise<string | null> {
   const cached = sheetCache.get(url);
@@ -69,9 +71,17 @@ function processStyleRule(
   rule: CSSStyleRule,
   variableRoles: Map<string, Set<ColorRole>>,
   overrides: CssOverride[],
+  seen?: Set<string>,
 ): void {
   const selector = rule.selectorText;
   if (!selector) return;
+
+  const push = (override: CssOverride): void => {
+    const key = `${override.selector}|${override.property}|${override.value}|${override.important}`;
+    if (seen && seen.has(key)) return;
+    seen?.add(key);
+    overrides.push(override);
+  };
 
   const bgRaw =
     rule.style.getPropertyValue('background-color') ||
@@ -91,7 +101,7 @@ function processStyleRule(
         const role = [...roles][0];
         const rewritten = rewriteColorsInValue(value, role);
         if (rewritten) {
-          overrides.push({
+          push({
             selector: ':root, :host',
             property,
             value: rewritten,
@@ -135,7 +145,7 @@ function processStyleRule(
       }
     }
 
-    overrides.push({
+    push({
       selector,
       property,
       value: rewritten,
@@ -169,6 +179,7 @@ async function gatherSheets(doc: Document): Promise<CSSStyleSheet[]> {
 
   if (doc.adoptedStyleSheets?.length) {
     for (const sheet of doc.adoptedStyleSheets) {
+      if (ownSheets.has(sheet)) continue;
       sheets.push(sheet);
     }
   }
@@ -252,7 +263,79 @@ export function createCssRecolorStrategy(): PageThemeStrategy & {
   let mutationObserver: MutationObserver | null = null;
   let shadowObserver: MutationObserver | null = null;
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  let rescanTimer: ReturnType<typeof setInterval> | null = null;
+  let lastSheetSignature = '';
+  let loadListenerTarget: Document | null = null;
+  let loadListener: ((event: Event) => void) | null = null;
+  let stopped = false;
+  let adoptedOverrideSheet: CSSStyleSheet | null = null;
   const inlineBackups: InlineBackup[] = [];
+
+  /**
+   * Publish overrides where they always win the cascade: a constructable
+   * stylesheet adopted LAST. Document-level <style> overrides lose to sheets
+   * appended later and to adoptedStyleSheets (which hydration uses), while an
+   * adopted sheet outranks all document sheets and inline styles.
+   */
+  const publishOverrides = (doc: Document, css: string): void => {
+    const win = doc.defaultView;
+    if (win && typeof win.CSSStyleSheet !== 'undefined') {
+      try {
+        const sheet = adoptedOverrideSheet ?? new win.CSSStyleSheet();
+        adoptedOverrideSheet = sheet;
+        sheet.replaceSync(css);
+        ownSheets.add(sheet);
+        const adopted = Array.from(doc.adoptedStyleSheets ?? []).filter(
+          (s) => s !== sheet,
+        );
+        adopted.push(sheet);
+        doc.adoptedStyleSheets = adopted;
+        const fallback = doc.getElementById(EXTENSION_STYLE_ID);
+        if (fallback) fallback.remove();
+        return;
+      } catch {
+        // Constructable sheets unavailable or rejected; fall back below.
+      }
+    }
+    const styleEl = getOrCreateStyleEl(doc);
+    styleEl.textContent = css;
+  };
+
+  const removeOverrideSheet = (doc: Document): void => {
+    if (adoptedOverrideSheet) {
+      try {
+        const adopted = Array.from(doc.adoptedStyleSheets ?? []).filter(
+          (s) => s !== adoptedOverrideSheet,
+        );
+        doc.adoptedStyleSheets = adopted;
+      } catch {
+        // ignore
+      }
+      adoptedOverrideSheet = null;
+    }
+    doc.getElementById(EXTENSION_STYLE_ID)?.remove();
+  };
+
+  /** Cheap fingerprint of every reachable sheet, including hydration-added
+   * adopted sheets and CSSOM rule counts that mutations cannot report. */
+  const computeSheetSignature = (doc: Document): string => {
+    const parts: string[] = [];
+    const describe = (sheet: CSSStyleSheet): void => {
+      let count: number;
+      try {
+        count = sheet.cssRules.length;
+      } catch {
+        count = -1;
+      }
+      parts.push(`${sheet.href ?? 'inline'}:${count}`);
+    };
+    for (const sheet of Array.from(doc.styleSheets)) describe(sheet);
+    for (const sheet of Array.from(doc.adoptedStyleSheets ?? [])) {
+      if (sheet === adoptedOverrideSheet) continue;
+      describe(sheet);
+    }
+    return parts.join('|');
+  };
 
   const applyToDocument = async (doc: Document): Promise<number> => {
     const sheets = await gatherSheets(doc);
@@ -271,15 +354,15 @@ export function createCssRecolorStrategy(): PageThemeStrategy & {
       variableRoles.set(name, usage.roles);
     }
 
+    const seen = new Set<string>();
     const overrides: CssOverride[] = [];
     for (const sheet of sheets) {
       walkStyleRules(sheet, (rule) => {
-        processStyleRule(rule, variableRoles, overrides);
+        processStyleRule(rule, variableRoles, overrides, seen);
       });
     }
 
-    const styleEl = getOrCreateStyleEl(doc);
-    styleEl.textContent = buildOverrideSheet(overrides);
+    publishOverrides(doc, buildOverrideSheet(overrides));
 
     const inlineCount = rewriteInlineStyles(doc, inlineBackups);
     return overrides.length + inlineCount;
@@ -291,13 +374,34 @@ export function createCssRecolorStrategy(): PageThemeStrategy & {
     async apply(page: PageContext): Promise<StrategyResult> {
       const count = await applyToDocument(page.document);
       overrideCount = count;
+      stopped = false;
 
       const scheduleRefresh = () => {
         if (debounceTimer) clearTimeout(debounceTimer);
         debounceTimer = setTimeout(async () => {
+          debounceTimer = null;
+          if (stopped) return;
           overrideCount = await applyToDocument(page.document);
         }, 80);
       };
+
+      // A stylesheet resource finishing its fetch produces no DOM mutation,
+      // so watch load events to recolor sheets as they arrive on the fly.
+      const handleLoadEvent = (event: Event) => {
+        const target = event.target as Element | null;
+        if (
+          target instanceof HTMLLinkElement ||
+          target instanceof HTMLStyleElement
+        ) {
+          scheduleRefresh();
+        }
+      };
+      if (loadListenerTarget && loadListener) {
+        loadListenerTarget.removeEventListener('load', loadListener, true);
+      }
+      loadListener = handleLoadEvent;
+      loadListenerTarget = page.document;
+      page.document.addEventListener('load', handleLoadEvent, true);
 
       mutationObserver?.disconnect();
       mutationObserver = new MutationObserver((mutations) => {
@@ -332,13 +436,27 @@ export function createCssRecolorStrategy(): PageThemeStrategy & {
         childList: true,
         subtree: true,
         attributes: true,
-        attributeFilter: ['style'],
+        attributeFilter: ['style', 'href'],
       });
 
       shadowObserver?.disconnect();
       shadowObserver = observeOpenShadows(page.document, (shadow) => {
         rewriteInlineStyles(shadow, inlineBackups);
       });
+
+      // Hydration swaps CSSOM rules and adoptedStyleSheets without DOM
+      // mutations; poll a cheap sheet signature to keep up with those.
+      lastSheetSignature = computeSheetSignature(page.document);
+      if (rescanTimer) clearInterval(rescanTimer);
+      rescanTimer = setInterval(() => {
+        if (stopped) return;
+        if (page.document.visibilityState === 'hidden') return;
+        const signature = computeSheetSignature(page.document);
+        if (signature !== lastSheetSignature) {
+          lastSheetSignature = signature;
+          scheduleRefresh();
+        }
+      }, 750);
 
       if (count > 0) {
         page.document.documentElement.setAttribute(
@@ -351,6 +469,7 @@ export function createCssRecolorStrategy(): PageThemeStrategy & {
     },
 
     revert(page: PageContext): void {
+      stopped = true;
       mutationObserver?.disconnect();
       mutationObserver = null;
       shadowObserver?.disconnect();
@@ -359,6 +478,17 @@ export function createCssRecolorStrategy(): PageThemeStrategy & {
         clearTimeout(debounceTimer);
         debounceTimer = null;
       }
+      if (rescanTimer) {
+        clearInterval(rescanTimer);
+        rescanTimer = null;
+      }
+      if (loadListenerTarget && loadListener) {
+        loadListenerTarget.removeEventListener('load', loadListener, true);
+        loadListenerTarget = null;
+        loadListener = null;
+      }
+
+      removeOverrideSheet(page.document);
 
       for (const backup of inlineBackups) {
         try {
@@ -373,7 +503,6 @@ export function createCssRecolorStrategy(): PageThemeStrategy & {
       }
       inlineBackups.length = 0;
 
-      page.document.getElementById(EXTENSION_STYLE_ID)?.remove();
       page.document.documentElement.removeAttribute(ROOT_SCHEME_ATTR);
       overrideCount = 0;
     },

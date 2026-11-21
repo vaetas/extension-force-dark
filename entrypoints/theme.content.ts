@@ -30,6 +30,7 @@ export default defineContentScript({
     };
 
     let running = false;
+    let lastStatus: PageThemeStatus | null = null;
 
     const run = async () => {
       if (running || ctx.isInvalid) return;
@@ -37,12 +38,14 @@ export default defineContentScript({
       try {
         revertThemePipeline(page);
         const result = await applyThemePipeline(page);
+        lastStatus = result.status;
         if (page.isTopFrame) {
           await reportStatus(result.status);
         }
       } catch (error) {
         console.warn('[ForceDark] theme pipeline failed', error);
         if (page.isTopFrame) {
+          lastStatus = 'idle';
           await reportStatus('idle');
         }
       } finally {
@@ -51,6 +54,18 @@ export default defineContentScript({
     };
 
     void run();
+
+    // Hydrating sites fetch and swap styles long after the first pass. If no
+    // strategy claimed the page, retry after load and on a short backoff so
+    // late-arriving styles still get darkened.
+    const retryWhenIdle = () => {
+      if (lastStatus === 'idle') void run();
+    };
+    ctx.addEventListener(window, 'load', () => {
+      retryWhenIdle();
+      window.setTimeout(retryWhenIdle, 1500);
+      window.setTimeout(retryWhenIdle, 4000);
+    });
 
     ctx.addEventListener(window, 'pageshow', (event) => {
       if ((event as PageTransitionEvent).persisted) {

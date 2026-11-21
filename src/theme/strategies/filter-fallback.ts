@@ -1,5 +1,9 @@
 import { hasLargeMediaSurface } from '../detector';
-import { FILTER_STYLE_ID, ROOT_SCHEME_ATTR } from '../css-utils';
+import {
+  EXTENSION_STYLE_ID,
+  FILTER_STYLE_ID,
+  ROOT_SCHEME_ATTR,
+} from '../css-utils';
 import type { PageContext, PageThemeStrategy, StrategyResult } from '../types';
 
 const FILTER_CSS = `
@@ -16,11 +20,46 @@ html[${ROOT_SCHEME_ATTR}="filter"] svg image {
 }
 `;
 
+const MAX_WAIT_MS = 4000;
+
+function waitForLoadOrTimeout(doc: Document): Promise<void> {
+  return new Promise((resolve) => {
+    if (doc.readyState === 'complete') {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(finish, MAX_WAIT_MS);
+    function finish(): void {
+      clearTimeout(timer);
+      window.removeEventListener('load', finish);
+      resolve();
+    }
+    window.addEventListener('load', finish, { once: true });
+  });
+}
+
 export const filterFallbackStrategy: PageThemeStrategy = {
   id: 'filter',
 
-  apply(page: PageContext): StrategyResult {
+  async apply(page: PageContext): Promise<StrategyResult> {
     if (hasLargeMediaSurface(page.document)) {
+      return 'continue';
+    }
+
+    // Give stylesheets still being fetched a chance: if the recolor pass has
+    // produced overrides by load time, inverting on top would double-darken.
+    await waitForLoadOrTimeout(page.document);
+    const overrideEl = page.document.getElementById(EXTENSION_STYLE_ID);
+    const adoptedOverrides = page.document.adoptedStyleSheets?.some(
+      (sheet) => {
+        try {
+          return sheet.cssRules.length > 0;
+        } catch {
+          return false;
+        }
+      },
+    );
+    if (overrideEl?.textContent?.trim() || adoptedOverrides) {
       return 'continue';
     }
 

@@ -14,10 +14,13 @@
     "zip:firefox": "wxt zip -b firefox",
     "postinstall": "wxt prepare",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:e2e": "wxt build && bun scripts/e2e-hydration.mjs",
+    "test:site": "wxt build && bun scripts/e2e-check.mjs"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.287",
+    "puppeteer-core": "^25.18.1",
     "typescript": "^5.7.3",
     "vitest": "^3.0.5",
     "wxt": "^0.19.25"

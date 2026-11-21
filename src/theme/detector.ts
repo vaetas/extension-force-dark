@@ -38,40 +38,38 @@ export function hasStrictDarkColorScheme(doc: Document): boolean {
   return content === 'only dark';
 }
 
-function samplePoint(
-  doc: Document,
-  x: number,
-  y: number,
-): { bgDark: boolean; textLight: boolean } | null {
-  const el = doc.elementFromPoint(x, y) as HTMLElement | null;
-  if (!el) return null;
-  const style = getComputedStyle(el);
-  const bg = parseColor(style.backgroundColor);
-  const fg = parseColor(style.color);
-
-  let bgDark = false;
-  let textLight = false;
-
-  if (bg && bg.a > 0.2) {
-    bgDark = srgbLightness(bg) <= 0.45;
-  } else {
-    // Walk up for an opaque background.
-    let node: HTMLElement | null = el;
-    while (node) {
-      const nodeBg = parseColor(getComputedStyle(node).backgroundColor);
-      if (nodeBg && nodeBg.a > 0.5) {
-        bgDark = srgbLightness(nodeBg) <= 0.45;
-        break;
-      }
-      node = node.parentElement;
+function effectivePageBackgroundIsLight(doc: Document): boolean {
+  // A light, opaque body/root background means the site is light-themed even
+  // if individual sample points (dark headers, images) happen to be dark.
+  for (const node of [doc.body, doc.documentElement]) {
+    if (!node) continue;
+    const bg = parseColor(getComputedStyle(node).backgroundColor);
+    if (bg && bg.a > 0.9) {
+      return srgbLightness(bg) > 0.45;
     }
   }
+  return false;
+}
 
-  if (fg) {
-    textLight = srgbLightness(fg) >= 0.55;
+function samplePointIsDarkBackground(doc: Document, x: number, y: number): boolean | null {
+  const el = doc.elementFromPoint(x, y) as HTMLElement | null;
+  if (!el) return null;
+
+  const bg = parseColor(getComputedStyle(el).backgroundColor);
+  if (bg && bg.a > 0.2) {
+    return srgbLightness(bg) <= 0.45;
   }
 
-  return { bgDark, textLight };
+  // Walk up for an opaque background.
+  let node: HTMLElement | null = el.parentElement;
+  while (node) {
+    const nodeBg = parseColor(getComputedStyle(node).backgroundColor);
+    if (nodeBg && nodeBg.a > 0.5) {
+      return srgbLightness(nodeBg) <= 0.45;
+    }
+    node = node.parentElement;
+  }
+  return null;
 }
 
 export function samplePageIsDark(doc: Document): boolean {
@@ -80,6 +78,10 @@ export function samplePageIsDark(doc: Document): boolean {
 
   const win = doc.defaultView;
   if (!win) return false;
+
+  // A light page canvas is decisive: sample points can hit dark headers or
+  // images and must not make a light site look dark.
+  if (effectivePageBackgroundIsLight(doc)) return false;
 
   const width = win.innerWidth || 800;
   const height = win.innerHeight || 600;
@@ -94,21 +96,11 @@ export function samplePageIsDark(doc: Document): boolean {
   let darkVotes = 0;
   let samples = 0;
 
-  const bodyStyle = doc.body ? getComputedStyle(doc.body) : null;
-  const rootStyle = getComputedStyle(doc.documentElement);
-  const rootBg = parseColor(
-    bodyStyle?.backgroundColor || rootStyle.backgroundColor,
-  );
-  if (rootBg && rootBg.a > 0.5) {
-    samples += 1;
-    if (srgbLightness(rootBg) <= 0.45) darkVotes += 1;
-  }
-
   for (const [x, y] of points) {
-    const sample = samplePoint(doc, x, y);
-    if (!sample) continue;
+    const vote = samplePointIsDarkBackground(doc, x, y);
+    if (vote == null) continue;
     samples += 1;
-    if (sample.bgDark || sample.textLight) darkVotes += 1;
+    if (vote) darkVotes += 1;
   }
 
   if (samples === 0) return false;
